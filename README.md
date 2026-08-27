@@ -1,0 +1,2 @@
+# DGXSparkUtilWidget
+DGXSparkUtilのWeb画面をWidget風に見せるWindowsアプリ
