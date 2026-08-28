@@ -9,7 +9,7 @@
         Background="Transparent"
         ResizeMode="NoResize"
         Topmost="True"
-        WindowStartupLocation="CenterScreen"
+        WindowStartupLocation="Manual"
         Icon="images/DGXSpark.ico"
         Loaded="MainWindow_Loaded">
 

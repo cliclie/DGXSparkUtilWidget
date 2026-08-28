@@ -42,6 +42,14 @@ namespace DGXSparkUtilWidget
         public MainWindow()
         {
             InitializeComponent();
+
+            // CenterScreen は起動時アクティブモニター基準になるため、上段モニターで起動した
+            // 際に上段モニター中央に表示されてしまい見えなくなることがある。
+            // プライマリモニター（タスクバー側）の作業領域中央に明示的に配置する。
+            var workArea = SystemParameters.WorkArea;
+            Left = workArea.Left + (workArea.Width - Width) / 2;
+            Top = workArea.Top + (workArea.Height - Height) / 2;
+
             _normalBounds = new Rect(Left, Top, Width, Height);
 
             _controlBar = CreateControlBarWindow();
