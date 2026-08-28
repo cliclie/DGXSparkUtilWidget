@@ -50,8 +50,8 @@ namespace DGXSparkUtilWidget
             // メインウィンドウの WM_NCHITTEST をフック。ウィンドウモードでは HTTRANSPARENT を返し、
             // WebView2 のネイティブ子HWND（Chrome_WidgetWin_* 等、別プロセスのウィンドウ）を含めて
             // メインウィンドウ全体を OS レベルでクリックスルーにする。
-            _mainHwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).EnsureHandle());
-            _mainHwndSource?.AddHook(OnMainWindowHook);
+            // HwndSource はウィンドウハンドル生成後（SourceInitialized）で取得する。
+            SourceInitialized += OnSourceInitialized;
 
             LocationChanged += (s, e) => UpdateFloatingWindows();
             SizeChanged += (s, e) => UpdateFloatingWindows();
@@ -88,6 +88,17 @@ namespace DGXSparkUtilWidget
                     ShowOverlay();
                 }
             };
+        }
+
+        /// <summary>
+        /// HwndSource が生成された直後に WM_NCHITTEST フックを設置する。
+        /// （SourceInitialized は WPF の標準的なハンドルの取得タイミング）
+        /// </summary>
+        private void OnSourceInitialized(object? sender, EventArgs e)
+        {
+            _mainHwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+            LogDebug($"SourceInitialized: HwndSource=({_mainHwndSource != null}), MainHwnd=0x{new WindowInteropHelper(this).Handle.ToInt64():X}");
+            _mainHwndSource?.AddHook(OnMainWindowHook);
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -388,8 +399,8 @@ namespace DGXSparkUtilWidget
         {
             if (e.ChangedButton != MouseButton.Left || e.ButtonState != MouseButtonState.Pressed) return;
             _isDragging = true;
-            // スクリーン絶対座標で記録することで、ウィンドウが動いても基準がずれずドラッグが安定する。
-            _dragStartScreenMouse = ((FrameworkElement)sender).PointToScreen(e.GetPosition(null));
+            GetCursorPos(out POINT p);
+            _dragStartScreenMouse = new Point(p.X, p.Y);
             _dragStartPos = new Point(Left, Top);
             _overlay.CaptureMouse();
             LogDebug($"overlay MouseDown (drag start) main=({Left},{Top})");
@@ -398,13 +409,17 @@ namespace DGXSparkUtilWidget
         private void Overlay_MouseMove(object sender, MouseEventArgs e)
         {
             if (!_isDragging) return;
-            var fe = (FrameworkElement)sender;
-            Point nowScreen = fe.PointToScreen(e.GetPosition(null));
-            var src = PresentationSource.FromVisual(fe) as HwndSource;
+            GetCursorPos(out POINT cur);
+            var src = (HwndSource)PresentationSource.FromVisual(this);
             double scaleX = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
             double scaleY = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            Left = _dragStartPos.X + (nowScreen.X - _dragStartScreenMouse.X) / scaleX;
-            Top = _dragStartPos.Y + (nowScreen.Y - _dragStartScreenMouse.Y) / scaleY;
+            Left = _dragStartPos.X + (cur.X - _dragStartScreenMouse.X) / scaleX;
+            Top = _dragStartPos.Y + (cur.Y - _dragStartScreenMouse.Y) / scaleY;
+            // オーバーレイとコントロールバーをメインウィンドウに追従させる
+            _overlay.Left = Left;
+            _overlay.Top = Top;
+            PositionControlBar();
+            PositionWebModeButtonWindow();
         }
 
         private void Overlay_MouseUp(object sender, MouseButtonEventArgs e)
@@ -420,6 +435,47 @@ namespace DGXSparkUtilWidget
             UpdateFloatingWindows();
             // キーボード入力をメインウィンドウに向かい、Web ページへキーが送られないようにする
             SetFocus(new WindowInteropHelper(this).Handle);
+            LogOverlayZOrder();
+        }
+
+        /// <summary>オーバーレイとメインウィンドウの HWND・拡張スタイル・矩形・トップレベル Z-order を診断ログに出力する。</summary>
+        private void LogOverlayZOrder()
+        {
+            try
+            {
+                IntPtr oh = new WindowInteropHelper(_overlay).EnsureHandle();
+                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
+                if (oh == IntPtr.Zero || mh == IntPtr.Zero)
+                {
+                    LogDebug($"Z-order: overlayHwnd={oh} mainHwnd={mh} (null が存在)");
+                    return;
+                }
+                RECT or, mr;
+                GetWindowRect(oh, out or);
+                GetWindowRect(mh, out mr);
+                LogDebug($"Z-order: overlay=0x{oh.ToInt64():X} ex=0x{GetWindowLong(oh, GWL_EXSTYLE):X} rect=({or.Left},{or.Top})-({or.Right},{or.Bottom}) visible={_overlay.Visibility}");
+                LogDebug($"Z-order: main=0x{mh.ToInt64():X} ex=0x{GetWindowLong(mh, GWL_EXSTYLE):X} rect=({mr.Left},{mr.Top})-({mr.Right},{mr.Bottom})");
+                IntPtr h = GetTopWindow(IntPtr.Zero);
+                int i = 0;
+                while (h != IntPtr.Zero && i < 50)
+                {
+                    if (h == mh)
+                    {
+                        LogDebug($"Z-order: main は top-level #{i}");
+                        break;
+                    }
+                    if (h == oh)
+                    {
+                        LogDebug($"Z-order: overlay は top-level #{i}");
+                    }
+                    h = GetWindow(h, GW_HWNDNEXT);
+                    i++;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogDebug("Z-order 診断失敗: " + ex.Message);
+            }
         }
 
         private void HideOverlay()
@@ -427,9 +483,30 @@ namespace DGXSparkUtilWidget
             _overlay.Hide();
         }
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out POINT pt);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
+
+        [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetTopWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        private const uint GW_HWNDNEXT = 2;
         private static readonly IntPtr HWND_TOP = IntPtr.Zero;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
@@ -450,13 +527,17 @@ namespace DGXSparkUtilWidget
         /// </summary>
         private IntPtr OnMainWindowHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_NCHITTEST && !_isWebMode && wParam.ToInt32() == HTCLIENT)
+            if (msg != WM_NCHITTEST) return IntPtr.Zero;
+            if (_hitTestLogCount < 10)
             {
-                if (_hitTestLogCount < 3)
-                {
-                    _hitTestLogCount++;
-                    LogDebug($"WM_NCHITTEST -> HTTRANSPARENT (ウィンドウモード・Web入力遮断) #{_hitTestLogCount}");
-                }
+                _hitTestLogCount++;
+                LogDebug($"WM_NCHITTEST hwnd=0x{hwnd.ToInt64():X} hit={wParam.ToInt32()} webMode={_isWebMode} (#{_hitTestLogCount})");
+            }
+            // ウィンドウモード: クライアント領域のヒットコード（HTCLIENT 等）はすべて HTTRANSPARENT とし、
+            // メインウィンドウ配下の WebView2 ネイティブHWND 全体を入力透過にする。
+            // Webモード: デフォルト処理を返し、Webページが通常通り入力を受け取る。
+            if (!_isWebMode)
+            {
                 handled = true;
                 return new IntPtr(HTTRANSPARENT);
             }
