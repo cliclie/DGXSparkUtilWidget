@@ -1,0 +1,8 @@
+<Application x:Class="DGXSparkUtilWidget.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <!-- アプリ全体共通のスタイル定義 -->
+    </Application.Resources>
+</Application>

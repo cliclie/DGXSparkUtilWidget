@@ -1,0 +1,33 @@
+<Window x:Class="DGXSparkUtilWidget.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="DGX Spark Utility"
+        Width="800" Height="600"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        Topmost="True"
+        WindowStartupLocation="CenterScreen"
+        Icon="images/DGXSpark.ico"
+        Loaded="MainWindow_Loaded">
+
+    <!-- ルートの角丸Border -->
+    <Border x:Name="RootBorder"
+            CornerRadius="10"
+            Background="#FF1E1E2E"
+            ClipToBounds="True"
+            MouseLeftButtonDown="RootBorder_MouseLeftButtonDown"
+            MouseEnter="RootBorder_MouseEnter"
+            MouseLeave="RootBorder_MouseLeave">
+        <Grid>
+            <!-- WebView2 メインコンテンツ -->
+            <wv2:WebView2 x:Name="WebView"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"/>
+
+        </Grid>
+    </Border>
+</Window>
+
