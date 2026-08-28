@@ -348,18 +348,22 @@ namespace DGXSparkUtilWidget
         /// </summary>
         private Window CreateOverlayWindow()
         {
+            // WPF のAllowsTransparencyウィンドウで alpha=0（Brushes.Transparent）だと、
+            // レイヤーウィンドウのヒットテストで全ピクセルが HTTRANSPARENT 扱いになり
+            // マウスイベントが受信できない。alpha=1（事実上透明）にすることで
+            // OS へのヒットテストは HTCLIENT になり、マウス入力を受信できる。
+            var hitTestBrush = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
             var overlay = new Window
             {
                 WindowStyle = WindowStyle.None,
                 AllowsTransparency = true,
-                Background = Brushes.Transparent,
+                Background = hitTestBrush,
                 Topmost = true,
                 ShowInTaskbar = false,
                 ResizeMode = ResizeMode.NoResize,
             };
-            // 全領域を透明なBorderで覆い、WPFのヒットテストを確実に行わせる（背景ブラシがnullでないと
-            // マウスイベントが受信されない）。見た目は完全に透明。
-            overlay.Content = new Border { Background = Brushes.Transparent };
+            // 全領域を alpha=1 の Border で覆い、WPF のヒットテストを確実に行わせる
+            overlay.Content = new Border { Background = hitTestBrush };
             overlay.Loaded += (s, e) =>
             {
                 IntPtr h = new WindowInteropHelper(overlay).Handle;
