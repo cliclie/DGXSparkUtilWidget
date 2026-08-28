@@ -324,6 +324,7 @@ namespace DGXSparkUtilWidget
                 _hideTimer?.Stop();
                 _controlBar.Hide();
                 ShowWebModeButtonWindow();
+                SetMainHitTestTransparent(false); // メインウィンドウをヒットテスト可能に（Web が操作可能に）
             }
             else
             {
@@ -333,6 +334,7 @@ namespace DGXSparkUtilWidget
                 HideWebModeButtonWindow();
                 // Webモードから戻った直後は、操作した場所の近く（右上）にコントロールバーを即表示する
                 if (_wasWebMode) ShowControlBar();
+                SetMainHitTestTransparent(true); // メインウィンドウを OS レベルでヒットテスト不能に（Web 入力を遮断）
             }
             _wasWebMode = webMode;
         }
@@ -571,6 +573,36 @@ namespace DGXSparkUtilWidget
         [DllImport("user32.dll")]
         private static extern bool SetFocus(IntPtr hWnd);
 
+        private const uint SWP_FRAMECHANGED = 0x0020;
+        private const uint SWP_NOZORDER = 0x0004;
+
+        /// <summary>
+        /// メインウィンドウ自体を OS レベルでマウスヒットテスト不能にする（ウィンドウモード時）。
+        /// 単なる WM_NCHITTEST=HTTRANSPARENT では、レイヤーウィンドウのレイヤー bitmap が不透明な
+        /// 領域では OS が WM_NCHITTEST を送らず WebView2 のネイティブ子HWNDに入力が渡る場合があるため、
+        /// WS_EX_TRANSPARENT を付与してウィンドウ全体（子HWND含む）をヒットテストから除外する。
+        /// 透過した入力は Z-order 直下の入力遮断オーバーレイに届く。
+        /// </summary>
+        private void SetMainHitTestTransparent(bool transparent)
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                if (transparent) ex |= WS_EX_TRANSPARENT;
+                else ex &= ~WS_EX_TRANSPARENT;
+                SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+                // スタイル変更を即座に適用（位置・サイズ・Z-order は維持）
+                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+                LogDebug($"Main WS_EX_TRANSPARENT = {transparent} (ex=0x{ex:X})");
+            }
+            catch (Exception ex)
+            {
+                LogDebug("SetMainHitTestTransparent error: " + ex.Message);
+            }
+        }
+
         /// <summary>オーバーレイ / コントロールバー / 復帰ボタンをメインウィンドウの位置・サイズに追従させる。</summary>
         private void UpdateFloatingWindows()
         {
@@ -632,7 +664,8 @@ namespace DGXSparkUtilWidget
                     Content = button,
                 };
             }
-            PositionWebModeButtonWindow();
+            _webModeButtonWindow.Left = Left + Width - 48 - 8;
+            _webModeButtonWindow.Top = Top + 8;
             _webModeButtonWindow.Show();
             _webModeButtonWindow.Activate();
         }

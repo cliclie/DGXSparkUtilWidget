@@ -1,9 +1,9 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $proj = "d:\SynologyDrive\WhitebearATOM1\DGXSparkUtilWidget"
 $exe  = Join-Path $proj "bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe"
 $log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
 
-Add-Type -Path (Join-Path $proj "Native.cs")
+Add-Type -Path (Join-Path $proj "tools\Native.cs")
 
 $beforeLines = (Get-Content $log).Count
 
@@ -43,3 +43,4 @@ Write-Host "=== NEW LOG ENTRIES ==="
 
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Write-Host "killed pid=$($p.Id)"
+

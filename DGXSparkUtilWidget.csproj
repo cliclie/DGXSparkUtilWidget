@@ -25,4 +25,9 @@
     <Resource Include="images\DGXSpark.ico" />
   </ItemGroup>
 
+  <!-- 診断用ヘルパー（PowerShell テスト用 P/Invoke）をアプリビルドから除外 -->
+  <ItemGroup>
+    <Compile Remove="tools\**\*.cs" />
+  </ItemGroup>
+
 </Project>
