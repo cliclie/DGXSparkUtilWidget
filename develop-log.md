@@ -101,18 +101,46 @@
 
 ---
 
+### 8. ウィンドウ移動後にコントロールバーのアイコンが反応しなくなる問題の修正（2026-08-29）
+
+- **症状:** 起動後にウィンドウをドラッグで移動すると、右上のアイコンが表示されず／反応しない。動かさない限りほぼ正常。
+- **再現・解析（`tools/test_hover_after_drag.ps1` 新規作成＋診断ログ追加）:**
+  - `WindowFromPoint` による判定で再現: ドラッグ後、バーのウィンドウが存在するのにヒットテストがオーバーレイを返す（＝クリック不能）
+  - **欠陥1:** `ShowControlBar()` が `BringToFront` を Hidden→Visible 遷移時のみ実行していた → ドラッグ中にバーの HWND がオーバーレイの下に沈んでも再固定されない
+  - **欠陥2:** ドラッグ終了（`CaptureMouse()` の解放＋ウィンドウ移動）後、オーバーレイに対する WPF のマウス enter/leave 追跡が停止する → `ShowControlBar()` が二度と呼ばれずバー自体も再表示されない
+  - 当初の「MouseEnter エッジトリガー非対称」仮説はログにより否定（ドラッグ中にも `MouseEnter` は発火していた）
+- **修正案:**
+  - **Fix 1:** `ShowControlBar()` の `BringToFront` を Visibility ガード外へ移動し毎回実行（`SetWindowPos(HWND_TOP)` は低コスト）
+  - **Fix 2:** `Overlay_MouseMove` でドラッグ中でないとき `ShowControlBar()` を呼ぶ（レベルトリガー化: カーソルがウィンドウ内で動いている限り表示。欠陥2の回避にもなる）
+  - フェードインアニメーションを現在の opacity から開始に変更（MouseMove からの頻繁な呼び出しでフェードがリセットされるのを防ぐ）
+  - Fix 3（`UpdateFloatingWindows()` での Z-order 再固定）は Fix 1+2 で実質カバーされるため今回は見送り
+- **テスト計画:**
+  1. `tools/test_hover_after_drag.ps1` を再実行 → Phase C / D が `OK (hits bar)` になること（A / B は従来通り正常）
+  2. `tools/test_drag.ps1` を実行し、ドラッグ移動・オーバーレイ追従に回帰がないことを確認
+  3. 実マウスでの最終確認
+- **結果（2026-08-29 実測）:**
+  - `tools/test_hover_after_drag.ps1`: **5フェーズすべて OK**（修正前: C=BUG REPRODUCED / D=NG / E=BUG REPRODUCED → 修正後: すべて `OK (hits bar)`）
+  - ドラッグ後も enter/leave イベントが正常に発火し、`ShowControlBar: hidden bar -> show` が記録されることを確認
+  - `tools/test_drag.ps1`: DRAG WORKS（delta=90,60）+ OVERLAY FOLLOWS main（回帰なし）
+  - 診断ログ（overlay/バーの MouseEnter・MouseLeave、ShowControlBar の表示遷移、Hide() 完了）はイベント単位で低ノイズのため**常設として残置**
+  - `tools/test_drag.ps1` の `$proj` が旧パス（`d:\SynologyDrive\...`）を指していたため現ワークスペースへ更新
+  - **実マウスでの最終確認: 完了**（起動後にドラッグでウィンドウを移動しても右上ホバーでコントロールバーが表示・操作できることをユーザーが確認）
+
+---
+
 ### 現在の tools/ 構成
 
 ```
 tools/
-├── Native.cs          # P/Invoke ヘルパー（スクリプト用、ビルド対象外）
-├── test_diag.ps1      # Z-order / WindowFromPoint 診断
-├── test_input.ps1     # 入力遮断検証
-├── test_drag.ps1      # ドラッグ移動検証
-└── test_toggle.ps1    # Web 切替往復検証
+├── Native.cs                # P/Invoke ヘルパー（スクリプト用、ビルド対象外）
+├── test_diag.ps1            # Z-order / WindowFromPoint 診断
+├── test_input.ps1           # 入力遮断検証
+├── test_drag.ps1            # ドラッグ移動検証
+├── test_hover_after_drag.ps1 # ドラッグ後のホバー再現テスト（#8 で追加）
+└── test_toggle.ps1          # Web 切替往復検証
 ```
 
 ### 既知の残タスク / リスク
 
-- Web 切替往復テストは PowerShell シミュレーションで検証済み。実マウスでの最終確認（明日の起動時）が未実施
+- #8 のレベルトリガー化により、ドラッグ後に WPF のホバー追跡が停止した状態ではカーソルがウィンドウ外に出てもバーが消えない場合がある（見た目の問題のみ・機能には影響なし）
 - `WS_EX_TRANSPARENT` は子ツリー全体に効くため、将来メインウィンドウ内にネイティブコントロールを追加する場合は影響を確認する必要がある

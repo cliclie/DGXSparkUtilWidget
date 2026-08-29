@@ -196,19 +196,23 @@ namespace DGXSparkUtilWidget
             HideControlBar();
         }
 
-        /// <summary>フローティングコントロールバー（独立ウィンドウ）を表示する。</summary>
+        /// <summary>フローティングコントロールバー（独立ウィンドウ）を表示する。ホバー時のレベルトリガーとして頻繁に呼ばれるため冪等である。</summary>
         private void ShowControlBar()
         {
             _hideTimer?.Stop();
             if (_controlBar.Visibility != Visibility.Visible)
             {
+                LogDebug($"ShowControlBar: hidden bar -> show (opacity={_controlBar.Opacity:F2})");
                 _controlBar.Show();
-                BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
                 PositionControlBar();
             }
+            // 常に最前面へ再固定する。ドラッグ中に HWND がオーバーレイの下に沈むことがあるため、
+            // 表示遷移時のみでは不十分（SetWindowPos(HWND_TOP) は低コスト）。
+            BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
             if (_controlBar.Opacity < 0.5)
             {
-                var anim = new DoubleAnimation(0.0, 1.0, new Duration(TimeSpan.FromMilliseconds(250)))
+                // 現在の opacity から開始することで、MouseMove からの繰り返し呼び出しでフェードがリセットされない
+                var anim = new DoubleAnimation(_controlBar.Opacity, 1.0, new Duration(TimeSpan.FromMilliseconds(250)))
                 { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
                 _controlBar.BeginAnimation(OpacityProperty, anim);
             }
@@ -228,7 +232,11 @@ namespace DGXSparkUtilWidget
                     { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
                     anim.Completed += (_, __) =>
                     {
-                        if (_controlBar.Opacity < 0.5) _controlBar.Hide();
+                        if (_controlBar.Opacity < 0.5)
+                        {
+                            LogDebug("control bar -> Hide() (fade-out complete)");
+                            _controlBar.Hide();
+                        }
                     };
                     _controlBar.BeginAnimation(OpacityProperty, anim);
                 }
@@ -404,8 +412,8 @@ namespace DGXSparkUtilWidget
             bar.BtnClose.Click += BtnClose_Click;
             bar.BtnMenu.Click += BtnMenu_Click;
             bar.BtnWebToggle.Click += BtnWebToggle_Click;
-            bar.MouseEnter += (s, e) => _hideTimer?.Stop();
-            bar.MouseLeave += (s, e) => HideControlBar();
+            bar.MouseEnter += (s, e) => { LogDebug("control bar MouseEnter"); _hideTimer?.Stop(); };
+            bar.MouseLeave += (s, e) => { LogDebug("control bar MouseLeave -> HideControlBar"); HideControlBar(); };
             return bar;
         }
 
@@ -422,7 +430,14 @@ namespace DGXSparkUtilWidget
 
         private void Overlay_MouseMove(object sender, MouseEventArgs e)
         {
-            if (!_isDragging) return;
+            if (!_isDragging)
+            {
+                // レベルトリガー: カーソルがウィンドウ内で動いている限りバーを表示する。
+                // ドラッグ終了後に WPF の enter/leave 追跡が停止しても（エッジイベントが発火しなくても）
+                // カーソルの移動だけでバーが再表示・再固定される。
+                ShowControlBar();
+                return;
+            }
             GetCursorPos(out POINT cur);
             var src = (HwndSource)PresentationSource.FromVisual(this);
             double scaleX = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;

@@ -15,7 +15,9 @@ DGX Spark Utility の Web 画面を Widget 風に表示する Windows デスク�
 | フレームレス・角丸ウィンドウ | `WindowStyle=None` + `CornerRadius=10` の角丸ウィンドウ |
 | 常に最前面 | `Topmost=True` により他のウィンドウの上に表示 |
 | ドラッグ移動 | 背景（Border）を左クリックドラッグでウィンドウ移動 |
-| フローティングコントロールバー | マウスオーバー時に右上にフェードイン表示 |
+| ウィンドウ操作モード（既定） | Web ページへの OS 入力を遮断し、ウィンドウのドラッグ移動などが可能 |
+| Web 操作トグル | コントロールバーの ⚡ ボタンで Web ページを直接操作可能に。右上の復帰ボタンで戻す |
+| フローティングコントロールバー | マウスオーバー時に右上にフェードイン表示（独立 Topmost ウィンドウ） |
 | 最小化 / 最大化 / 閉じる | コントロールバーのボタンで操作 |
 | 設定ダイアログ | ハンバーガーメニューから URL・透過率の設定 |
 | 透過率調整 | 0.2〜1.0 で無段階にウィンドウ全体の不透明度を変更 |
@@ -29,10 +31,15 @@ DGXSparkUtilWidget/
 ├── DGXSparkUtilWidget.sln           # ソリューションファイル
 ├── DGXSparkUtilWidget.csproj        # プロジェクトファイル
 ├── App.xaml / App.xaml.cs           # アプリエントリポイント
-├── MainWindow.xaml / .xaml.cs       # メインウィンドウ（WebView2 + フローティングUI）
+├── MainWindow.xaml / .xaml.cs       # メインウィンドウ（WebView2 + 入力遮断オーバーレイ）
+├── ControlBarWindow.xaml / .xaml.cs # フローティングコントロールバー（独立 Topmost ウィンドウ）
 ├── SettingsDialog.xaml / .xaml.cs   # 設定ダイアログ
 ├── images/
-│   └── DGXSpark.ico                 # アプリケーションアイコン
+│   ├── DGXSpark.ico                 # アプリケーションアイコン
+│   └── DGXSpark.png                 # アイコン元画像
+├── tools/                           # 診断・テスト用 PowerShell スクリプト（ビルド対象外）
+├── develop-log.md                   # 開発ログ
+├── specification.md                 # 仕様書
 └── README.md
 ```
 
@@ -83,4 +90,6 @@ dotnet publish -c Release -r win-x64
 | 最大化 / 元に戻す | 右上コントロールバーの `□` / `❐` ボタン |
 | 閉じる | 右上コントロールバーの `✕` ボタン |
 | 設定変更 | 右上コントロールバーの `≡` ボタン |
+| Web ページを操作する | 右上コントロールバーの ⚡ ボタン（Web 操作モード） |
+| ウィンドウ操作に戻る | Web 操作モード中表示の右上復帰ボタン |
 
