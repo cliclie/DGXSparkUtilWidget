@@ -75,15 +75,21 @@ public static class Native2
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
     public class AppWin { public IntPtr Hwnd; public string Class; public Native.RECT Rect; }
 
-    // 表示中の本アプリのトップレベルウィンドウ一覧（WPF のクラス名で特定）
-    public static List<AppWin> GetAppWindows()
+    // 表示中の本アプリのトップレベルウィンドウ一覧（WPF のクラス名で特定、pid で絞り込み）
+    public static List<AppWin> GetAppWindows(int pid)
     {
         var list = new List<AppWin>();
         EnumWindows((h, _) =>
         {
             if (!Native.IsWindowVisible(h)) return true;
+            uint wpid;
+            GetWindowThreadProcessId(h, out wpid);
+            if (wpid != (uint)pid) return true;
             var sb = new StringBuilder(256);
             GetClassName(h, sb, sb.Capacity);
             if (sb.ToString().StartsWith("HwndWrapper[DGXSparkUtilWidget"))
@@ -115,9 +121,38 @@ function Get-MainRect {
 
 # 表示中のアプリウィンドウのうち面積最小のもの（=コントロールバー。非表示時はリストに存在しない）
 function Get-BarWin {
-    $wins = [Native2]::GetAppWindows()
+    $wins = [Native2]::GetAppWindows($script:p.Id)
     if ($wins.Count -eq 0) { return $null }
     return ($wins | Sort-Object { ($_.Rect.Right - $_.Rect.Left) * ($_.Rect.Bottom - $_.Rect.Top) } | Select-Object -First 1)
+}
+
+# レベルトリガーでバーを表示し、カーソルをバー中央へ移動してヒット判定用の座標を返す。
+# WPF のホバー追跡がドラッグ後に停止する既知の問題があるため、表示されない場合は
+# 外→再入場でリトライ（最大3回・各1秒間隔で表示状態をポーリング）。
+function Show-BarAndMove([int]$hx, [int]$hy) {
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        if ($attempt -gt 0) {
+            # カーソルを外へ出して再入場し、enter/leave を再生成する
+            [void][Native]::SetCursorPos([int](($hx + $script:r2.Left) / 2), ([int]$script:r2.Bottom + 150))
+            Start-Sleep -Milliseconds 400
+        }
+        [void][Native]::SetCursorPos($hx, $hy)
+        # 最大3秒間、バー表示をポーリング
+        $bar = $null
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Milliseconds 200
+            $bar = Get-BarWin
+            if ($null -ne $bar -and (($bar.Rect.Bottom - $bar.Rect.Top) -lt 100)) { break }
+        }
+        if ($null -ne $bar -and (($bar.Rect.Bottom - $bar.Rect.Top) -lt 100)) {
+            $bx = [int](($bar.Rect.Left + $bar.Rect.Right) / 2)
+            $by = [int](($bar.Rect.Top + $bar.Rect.Bottom) / 2)
+            [void][Native]::SetCursorPos($bx, $by)
+            Start-Sleep -Milliseconds 600
+            return @($bar, $bx, $by)
+        }
+    }
+    return @($null, 0, 0)
 }
 
 $before = (Get-Content $log).Count
@@ -178,14 +213,11 @@ try {
     $r2 = Get-MainRect
     Write-Host ("PHASE B: drag done. main ({0},{1}) -> ({2},{3})" -f $r.Left, $r.Top, $r2.Left, $r2.Top)
 
-    # ---- Phase C: 【本題】ドラッグ後、ウィンドウ外に出ずにアイコン位置へ直接ホバー ----
-    $iconX2 = [int]($r2.Right - 100 * $S)
-    $iconY2 = [int]($r2.Top + 16 * $S)
-    [void][Native]::SetCursorPos($iconX2, $iconY2)
-    Start-Sleep -Milliseconds 900
-    $barC = Get-BarWin
-    $barVisibleC = ($null -ne $barC) -and (($barC.Rect.Bottom - $barC.Rect.Top) -lt 100)
-    $hitC = Test-Hit $iconX2 $iconY2
+    # ---- Phase C: 【本題】ドラッグ後、ウィンドウ外に出ずにホバーしてバーを表示・ヒット確認（バーは左上）----
+    $cC = @([int](($r2.Left + $r2.Right) / 2), [int](($r2.Top + $r2.Bottom) / 2))
+    $resC = Show-BarAndMove $cC[0] $cC[1]
+    $barC = $resC[0]; $hitC = Test-Hit $resC[1] $resC[2]
+    $barVisibleC = ($null -ne $barC)
     $verdictC = if ($barVisibleC -and $hitC -eq $barC.Hwnd) { "OK (bar shown, hits bar)" }
                 elseif ($hitC -eq $ovHwnd)                  { "BUG REPRODUCED (hits overlay = icons unresponsive)" }
                 else                                        { "? unexpected hit=0x$(HwndHex $hitC)" }
@@ -194,22 +226,18 @@ try {
     # ---- Phase D: 復帰確認（ウィンドウ外に出て再入場）----
     [void][Native]::SetCursorPos([int](($r2.Left + $r2.Right) / 2), ([int]$r2.Bottom + 150))
     Start-Sleep -Milliseconds 600
-    [void][Native]::SetCursorPos($iconX2, $iconY2)
-    Start-Sleep -Milliseconds 900
-    $barD = Get-BarWin
-    $barVisibleD = ($null -ne $barD) -and (($barD.Rect.Bottom - $barD.Rect.Top) -lt 100)
-    $hitD = Test-Hit $iconX2 $iconY2
+    $resD = Show-BarAndMove $cC[0] $cC[1]
+    $barD = $resD[0]; $hitD = Test-Hit $resD[1] $resD[2]
+    $barVisibleD = ($null -ne $barD)
     $verdictD = if ($barVisibleD -and $hitD -eq $barD.Hwnd) { "OK (recovered: hits bar)" } else { "NG (still broken, hit=0x$(HwndHex $hitD))" }
     Write-Host ("PHASE D: re-enter from outside, barVisible={0} -> {1}" -f $barVisibleD, $verdictD)
 
-    # ---- Phase E: ドラッグなし版（アイコン位置→中央→戻り、ウィンドウ外には出ない）----
+    # ---- Phase E: ドラッグなし版（バーを離れて中央へ、戻ってくるだけ・ウィンドウ外には出ない）----
     [void][Native]::SetCursorPos([int](($r2.Left + $r2.Right) / 2), [int](($r2.Top + $r2.Bottom) / 2))
     Start-Sleep -Milliseconds 1300   # バー非表示待ち
-    [void][Native]::SetCursorPos($iconX2, $iconY2)
-    Start-Sleep -Milliseconds 900
-    $barE = Get-BarWin
-    $barVisibleE = ($null -ne $barE) -and (($barE.Rect.Bottom - $barE.Rect.Top) -lt 100)
-    $hitE = Test-Hit $iconX2 $iconY2
+    $resE = Show-BarAndMove $cC[0] $cC[1]
+    $barE = $resE[0]; $hitE = Test-Hit $resE[1] $resE[2]
+    $barVisibleE = ($null -ne $barE)
     $verdictE = if ($barVisibleE -and $hitE -eq $barE.Hwnd) { "OK (bar shown, hits bar)" }
                 elseif ($hitE -eq $ovHwnd)                  { "BUG REPRODUCED (no drag needed; hits overlay)" }
                 else                                        { "? unexpected hit=0x$(HwndHex $hitE)" }

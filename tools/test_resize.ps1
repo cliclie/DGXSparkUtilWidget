@@ -49,14 +49,20 @@ public static class Native
     public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     public class AppWin { public IntPtr Hwnd; public string Class; public RECT Rect; }
-    public static List<AppWin> GetAppWindows()
+    // pid で絞ることで、同名クラスを持つ別プロセス（前回のテスト残骸等）のウィンドウを除外する
+    public static List<AppWin> GetAppWindows(int pid)
     {
         var list = new List<AppWin>();
         EnumWindows((h, _) =>
         {
             if (!IsWindowVisible(h)) return true;
+            uint wpid;
+            GetWindowThreadProcessId(h, out wpid);
+            if (wpid != (uint)pid) return true;
             var sb = new StringBuilder(256);
             GetClassName(h, sb, sb.Capacity);
             if (sb.ToString().StartsWith("HwndWrapper[DGXSparkUtilWidget"))
@@ -151,7 +157,7 @@ try {
     # 右上の窓内近傍にホバー（窓外へ出ると MouseLeave が発火してバーが非表示になるため）
     $hx = [int]($rf.Right - 60 * $S); $hy = [int]($rf.Top + 24 * $S)
     [void][Native]::SetCursorPos($hx, $hy); Start-Sleep -Milliseconds 900
-    $bar = ([Native]::GetAppWindows() | Sort-Object { ($_.Rect.Right-$_.Rect.Left)*($_.Rect.Bottom-$_.Rect.Top) } | Select-Object -First 1)
+    $bar = ([Native]::GetAppWindows($p.Id) | Sort-Object { ($_.Rect.Right-$_.Rect.Left)*($_.Rect.Bottom-$_.Rect.Top) } | Select-Object -First 1)
     if ($null -eq $bar -or (($bar.Rect.Bottom - $bar.Rect.Top) -ge 100)) { Write-Host "PHASE E: NG - control bar not found"; exit 1 }
     # Web操作トグル（先頭ボタン）中心 = バー左端 + (46/2) * DPI（46pxボタン・余白なし）
     $webBtnX = [int]($bar.Rect.Left + (23 * $S)); $webBtnY = [int](($bar.Rect.Top + $bar.Rect.Bottom)/2)
@@ -159,7 +165,7 @@ try {
     Start-Sleep -Milliseconds 500
     $rg = Get-MainRect
     # リサイズ帯ウィンドウ（幅または高さが 10px 以下。Webモードではオーバーレイは非表示で帯4本のみ）
-    $bandWins = [Native]::GetAppWindows() | Where-Object { (($_.Rect.Bottom - $_.Rect.Top) -le 10) -or ((($_.Rect.Right - $_.Rect.Left)) -le 10) }
+    $bandWins = [Native]::GetAppWindows($p.Id) | Where-Object { (($_.Rect.Bottom - $_.Rect.Top) -le 10) -or ((($_.Rect.Right - $_.Rect.Left)) -le 10) }
     $hitCenter = Test-Hit ([int](($rg.Left+$rg.Right)/2)) ([int](($rg.Top+$rg.Bottom)/2))
     $centerIsBand = @($bandWins | Where-Object { $_.Hwnd -eq $hitCenter }).Count -gt 0
     $passOk = ($hitCenter -ne $script:mainHwnd) -and (-not $centerIsBand)   # WebView2 子HWND に届くはず
@@ -175,15 +181,15 @@ try {
     $rh = Get-MainRect; $oh = Get-OvRect
     $dw2 = ($rh.Right - $rh.Left) - ($rg.Right - $rg.Left); $dh2 = ($rh.Bottom - $rh.Top) - ($rg.Bottom - $rg.Top)
     $followF = ([math]::Abs(($oh.Right-$oh.Left) - ($rh.Right-$rh.Left))) -lt 3
-    # 復帰ボタン（50x32・右上）が新しい右上に追従しているか
-    $btn = [Native]::GetAppWindows() | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 28 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 } | Select-Object -First 1
-    $btnOk = ($null -ne $btn) -and ([math]::Abs($btn.Rect.Right - $rh.Right) -lt 20) -and ([math]::Abs($btn.Rect.Top - $rh.Top) -lt 20)
+    # 復帰バー（230x32・左上）が新しい左上に追従しているか
+    $btn = [Native]::GetAppWindows($p.Id) | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 28 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 } | Select-Object -First 1
+    $btnOk = ($null -ne $btn) -and ([math]::Abs($btn.Rect.Left - $rh.Left) -lt 30) -and ([math]::Abs($btn.Rect.Top - $rh.Top) -lt 30)
     $verdictF = if (($dw2 -ge 60) -and ($dh2 -ge 45) -and $followF -and $btnOk) { "OK" } else { "NG" }
     Write-Host ("PHASE F: web-mode corner resize dW={0} dH={1}, overlay follows={2}, return button follows={3} -> {4}" -f `
         $dw2, $dh2, $followF, $btnOk, $verdictF)
 
     # ---- Phase G: 復帰ボタンクリック -> ウィンドウモード復帰 ----
-    if ($null -ne $btn) { Click-At ([int](($btn.Rect.Left+$btn.Rect.Right)/2)) ([int](($btn.Rect.Top+$btn.Rect.Bottom)/2)) }
+    if ($null -ne $btn) { Click-At ([int]($btn.Rect.Left + (23 * $S))) ([int](($btn.Rect.Top+$btn.Rect.Bottom)/2)) }
     Start-Sleep -Milliseconds 500
     $ri = Get-MainRect
     $hitBack = Test-Hit ([int](($ri.Left+$ri.Right)/2)) ([int](($ri.Top+$ri.Bottom)/2))

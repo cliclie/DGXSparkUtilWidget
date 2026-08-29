@@ -76,14 +76,21 @@ public static class Native2
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
     public class AppWin { public IntPtr Hwnd; public string Class; public Native.RECT Rect; }
 
-    public static List<AppWin> GetAppWindows()
+    // pid で絞ることで、同名クラスを持つ別プロセスのウィンドウを除外する
+    public static List<AppWin> GetAppWindows(int pid)
     {
         var list = new List<AppWin>();
         EnumWindows((h, _) =>
         {
             if (!Native.IsWindowVisible(h)) return true;
+            uint wpid;
+            GetWindowThreadProcessId(h, out wpid);
+            if (wpid != (uint)pid) return true;
             var sb = new StringBuilder(256);
             GetClassName(h, sb, sb.Capacity);
             if (sb.ToString().StartsWith("HwndWrapper[DGXSparkUtilWidget"))
@@ -126,12 +133,13 @@ function Click-Point([int]$x, [int]$y) {
 }
 
 # 蠕ｩ蟶ｰ繝懊ち繝ｳ・・8x48 縺ｮ譛蟆上え繧｣繝ｳ繝峨え・峨ｒ迚ｹ螳・
+# 復帰バー（コントロールバーと同じ幅・位置の 230x32 ウィンドウ）を検出（ツールチップ等は幅で除外）
 function Get-ReturnBtn {
-    $wins = [Native2]::GetAppWindows()
+    $wins = [Native2]::GetAppWindows($script:p.Id)
     foreach ($w in $wins) {
         $wW = $w.Rect.Right - $w.Rect.Left
         $wH = $w.Rect.Bottom - $w.Rect.Top
-        if (($wW -lt 60) -and ($wH -lt 60)) { return $w }
+        if (($wH -ge 24) -and ($wH -le 40) -and ($wW -ge 200)) { return $w }
     }
     return $null
 }
@@ -153,19 +161,20 @@ try {
     }
 
     # 蠕ｩ蟶ｰ繝懊ち繝ｳ縺ｮ迥ｶ諷九ｒ縺ｾ縺ｨ繧√※蛻､螳壹・蜃ｺ蜉・
+    # 復帰バーの位置・前面性・クリック可能性を確認（復帰ボタンはバー左端 +23px）
     function Check-ReturnBtn([string]$tag, $rect) {
         $btn = Get-ReturnBtn
         if ($null -eq $btn) {
-            Write-Host "$tag : BUG - return button window NOT visible"
+            Write-Host "$tag : BUG - return bar window NOT visible"
             return
         }
-        $bx = [int](($btn.Rect.Left + $btn.Rect.Right) / 2)
+        $bx = [int]($btn.Rect.Left + (23 * $S))
         $by = [int](($btn.Rect.Top + $btn.Rect.Bottom) / 2)
         $zB = Get-ZOrder $btn.Hwnd
         $zM = Get-ZOrder $mainHwnd
         $hit = Test-Hit $bx $by
-        $expX = [int]($rect.Right - 32 * $S); $expY = [int]($rect.Top + 32 * $S)
-        $posOk = ([math]::Abs($btn.Rect.Left - ($rect.Right - 56 * $S)) -le 4)
+        $expX = [int]($rect.Left + 8 * $S); $expY = [int]($rect.Top + 8 * $S)
+        $posOk = ([math]::Abs($btn.Rect.Left - $expX) -le 4) -and ([math]::Abs($btn.Rect.Top - $expY) -le 4)
         $verdict = if ($hit -eq $btn.Hwnd -and $zB -lt $zM) { "OK (visible, on top, clickable)" }
                    elseif ($hit -ne $btn.Hwnd)              { "BUG (hidden behind: hit=0x$(HwndHex $hit))" }
                    else                                     { "? unexpected" }
@@ -193,12 +202,12 @@ try {
     [void][Native]::SetCursorPos($cx2, $cy2)
     Start-Sleep -Milliseconds 900   # 繧ｳ繝ｳ繝医Ο繝ｼ繝ｫ繝舌・陦ｨ遉ｺ蠕・■・医Ξ繝吶Ν繝医Μ繧ｬ繝ｼ・・
     # Locate control bar dynamically (h 24-40px app window); WebToggle = 1st button center = bar Left + 23px (46px buttons, no margins)
-    $barB = [Native2]::GetAppWindows() | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 24 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 -and ($_.Rect.Right - $_.Rect.Left) -gt 100 } | Select-Object -First 1
+    $barB = [Native2]::GetAppWindows($script:p.Id) | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 24 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 -and ($_.Rect.Right - $_.Rect.Left) -ge 200 } | Select-Object -First 1
     if ($null -eq $barB) { Write-Host "PHASE B: BUG - control bar not found"; exit 1 }
     $togX = [int]($barB.Rect.Left + (23 * $S)); $togY = [int](($barB.Rect.Top + $barB.Rect.Bottom) / 2)
     Write-Host "PHASE B: clicking WebToggle at ($togX,$togY)"
     Click-Point $togX $togY
-    Start-Sleep -Seconds 1
+    Start-Sleep -Seconds 2   # 復帰バーの Show/配置が安定するまで待つ（直後は過渡矩形になることがある）
     Check-ReturnBtn "PHASE B" $r2
 
     # ---- Phase C: Web繝壹・繧ｸ荳ｭ螟ｮ繧ｯ繝ｪ繝・け・域桃菴懊す繝溘Η繝ｬ繝ｼ繧ｷ繝ｧ繝ｳ・俄・ 蠕ｩ蟶ｰ繝懊ち繝ｳ蜀咲｢ｺ隱・----
@@ -211,7 +220,7 @@ try {
     $trueCountBefore = ((Get-Content $log) | Select-String 'WS_EX_TRANSPARENT = True').Count
     $btnD = Get-ReturnBtn
     if ($null -ne $btnD) {
-        $bx = [int](($btnD.Rect.Left + $btnD.Rect.Right) / 2)
+        $bx = [int]($btnD.Rect.Left + (23 * $S))
         $by = [int](($btnD.Rect.Top + $btnD.Rect.Bottom) / 2)
         Write-Host "PHASE D: clicking return button at ($bx,$by)"
         Click-Point $bx $by

@@ -972,11 +972,11 @@ namespace DGXSparkUtilWidget
             PositionResizeBands();
         }
 
-        /// <summary>浮遊コントロールバーを右上に配置する。Webモードの復帰ボタンと同じアンカー（右端56px・上8px）で揃える。</summary>
+        /// <summary>浮遊コントロールバーを左上に配置する。Webモードの復帰バーと同じアンカー（左端8px・上8px）で揃える。</summary>
         private void PositionControlBar()
         {
             if (_controlBar is not { Visibility: Visibility.Visible }) return;
-            _controlBar.Left = Left + Width - _controlBar.Width - 56;
+            _controlBar.Left = Left + 8;
             _controlBar.Top = Top + 8;
         }
 
@@ -1016,6 +1016,18 @@ namespace DGXSparkUtilWidget
                 };
                 button.Click += (s, e) => SetWebMode(false);
 
+                var label = new TextBlock
+                {
+                    Text = "クリックで戻ります",
+                    Foreground = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(10, 0, 8, 0),
+                };
+
+                var panel = new StackPanel { Orientation = Orientation.Horizontal };
+                panel.Children.Add(button);
+                panel.Children.Add(label);
+
                 _webModeButtonWindow = new Window
                 {
                     WindowStyle = WindowStyle.None,
@@ -1023,12 +1035,18 @@ namespace DGXSparkUtilWidget
                     Background = Brushes.Transparent,
                     Topmost = true,
                     ShowInTaskbar = false,
-                    Width = 50,
+                    // コントロールバーと同じ幅・位置（左寄せ）の復帰バー
+                    Width = 230,
                     Height = 32,
-                    Content = button,
+                    Content = new Border
+                    {
+                        CornerRadius = new CornerRadius(8),
+                        Background = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
+                        Child = panel,
+                    },
                 };
             }
-            _webModeButtonWindow.Left = Left + Width - 56;
+            _webModeButtonWindow.Left = Left + 8;
             _webModeButtonWindow.Top = Top + 8;
             _webModeButtonWindow.Show();
             _webModeButtonWindow.Activate();
@@ -1137,28 +1155,28 @@ namespace DGXSparkUtilWidget
         private void PositionWebModeButtonWindow()
         {
             if (_webModeButtonWindow is null || _webModeButtonWindow.Visibility != Visibility.Visible) return;
-            _webModeButtonWindow.Left = Left + Width - _webModeButtonWindow.Width - 8;
+            // コントロールバーと同じ位置（左上・8pxオフセット）に追従させる
+            _webModeButtonWindow.Left = Left + 8;
             _webModeButtonWindow.Top = Top + 8;
         }
 
         private static ControlTemplate CreateReturnButtonTemplate()
         {
+            // コントロールバーのボタンと同様のスタイル（透明背景・ホバー時に薄い黒系ハイライト）
             var border = new FrameworkElementFactory(typeof(Border));
             border.Name = "BtnBorder";
-            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
-            border.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x2E)));
-            border.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x66)));
-            border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+            border.SetValue(Border.BackgroundProperty, Brushes.Transparent);
 
             var content = new FrameworkElementFactory(typeof(ContentPresenter));
             content.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             content.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             border.AppendChild(content);
 
-            // ホバー時に背景色を変更する（コントロールバーのホバーと同様の薄い白系）
+            // ホバー時に背景色を変更する
             var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
             hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty,
-                new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)), "BtnBorder"));
+                new SolidColorBrush(Color.FromArgb(0x40, 0x00, 0x00, 0x00)), "BtnBorder"));
 
             var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
             template.Triggers.Add(hoverTrigger);
