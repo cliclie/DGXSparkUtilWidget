@@ -340,6 +340,7 @@ namespace DGXSparkUtilWidget
                 // 復帰ボタンを非表示。コントロールバーはホバー時に表示される（オーバーレイの MouseEnter）。
                 ShowOverlay();
                 HideWebModeButtonWindow();
+                StopWebModePinTimer();
                 // Webモードから戻った直後は、操作した場所の近く（右上）にコントロールバーを即表示する
                 if (_wasWebMode) ShowControlBar();
                 SetMainHitTestTransparent(true); // メインウィンドウを OS レベルでヒットテスト不能に（Web 入力を遮断）
@@ -644,6 +645,7 @@ namespace DGXSparkUtilWidget
         /// 常にネイティブHWND より手前に表示される。
         /// </summary>
         private Window? _webModeButtonWindow;
+        private DispatcherTimer? _webModePinTimer;
 
         private void ShowWebModeButtonWindow()
         {
@@ -683,6 +685,84 @@ namespace DGXSparkUtilWidget
             _webModeButtonWindow.Top = Top + 8;
             _webModeButtonWindow.Show();
             _webModeButtonWindow.Activate();
+            LogWebModeButtonState("after Show/Activate");
+            // WPF の非同期処理（アクティベーションによる Topmost 再アサート等）完了後の状態も記録する
+            Dispatcher.BeginInvoke(new Action(() => LogWebModeButtonState("after dispatcher idle")), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            StartWebModePinTimer();
+        }
+
+        /// <summary>
+        /// Webモード中、復帰ボタンがメインウィンドウより上（前面）にあることを維持する。
+        /// メインウィンドウがアクティベートされるたびに WPF が Topmost を再アサートし
+        /// topmost 帯内でメインが最前面に上がるため、復帰ボタンが WebView2 に隠れてしまう。
+        /// </summary>
+        private void StartWebModePinTimer()
+        {
+            if (_webModePinTimer is null)
+            {
+                _webModePinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+                _webModePinTimer.Tick += (_, __) => PinWebModeButtonAboveMain();
+            }
+            _webModePinTimer.Start();
+        }
+
+        private void StopWebModePinTimer()
+        {
+            _webModePinTimer?.Stop();
+        }
+
+        /// <summary>復帰ボタンがメインより下（手前でない）になっていれば最前面へ戻す。</summary>
+        private void PinWebModeButtonAboveMain()
+        {
+            if (!_isWebMode) return;
+            if (_webModeButtonWindow is not { IsVisible: true }) return;
+            try
+            {
+                IntPtr bh = new WindowInteropHelper(_webModeButtonWindow).EnsureHandle();
+                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
+                // topmost 帯の先頭から走査: メインに先に当たればボタンはメインより下
+                IntPtr h = GetTopWindow(IntPtr.Zero);
+                for (int i = 0; h != IntPtr.Zero && i < 200; i++)
+                {
+                    if (h == bh) return; // ボタンがメインより上 = OK
+                    if (h == mh) break;
+                    h = GetWindow(h, GW_HWNDNEXT);
+                }
+                LogDebug("[webmode-btn] z-order violation detected -> re-pinning button above main");
+                BringToFront(bh);
+            }
+            catch
+            {
+                // 診断・再固定の失敗は無視（次回タイマーで再試行）
+            }
+        }
+
+        /// <summary>復帰ボタンウィンドウの表示状態・矩形・topmost帯内Z-order を診断ログに出力する。</summary>
+        private void LogWebModeButtonState(string when)
+        {
+            try
+            {
+                if (_webModeButtonWindow is null) return;
+                IntPtr bh = new WindowInteropHelper(_webModeButtonWindow).EnsureHandle();
+                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
+                RECT br, mr;
+                GetWindowRect(bh, out br);
+                GetWindowRect(mh, out mr);
+                // topmost帯内での相対位置: main の上（前方）にボタンがあるか
+                int idx = -1;
+                IntPtr h = GetTopWindow(IntPtr.Zero);
+                for (int i = 0; h != IntPtr.Zero && i < 200; i++)
+                {
+                    if (h == bh) { idx = i; break; }
+                    if (h == mh) break; // main に先に当たった = ボタンは main より下
+                    h = GetWindow(h, GW_HWNDNEXT);
+                }
+                LogDebug($"[webmode-btn] {when}: btn=0x{bh.ToInt64():X} visible={_webModeButtonWindow.IsVisible} rect=({br.Left},{br.Top})-({br.Right},{br.Bottom}) mainRect=({mr.Left},{mr.Top})-({mr.Right},{mr.Bottom}) zIdx={idx} (mainに先着=-1でボタンがmainの下)");
+            }
+            catch (Exception ex)
+            {
+                LogDebug("[webmode-btn] 診断失敗: " + ex.Message);
+            }
         }
 
         private void HideWebModeButtonWindow()

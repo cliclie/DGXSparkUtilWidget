@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$proj = "d:\SynologyDrive\WhitebearATOM1\DGXSparkUtilWidget"
+$proj = "d:\WhitebearATOM1\DGXSparkUtilWidget"
 $exe  = Join-Path $proj "bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe"
 $log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
 

@@ -128,6 +128,34 @@
 
 ---
 
+### 9. Web操作モード切替後に復帰ボタンが表示されない問題の修正（2026-08-29）
+
+- **症状:** ⚡ ボタンで Web操作モードに切り替えた後、右上に表示されるべき復帰ボタンが見えない。
+- **再現・解析（`tools/test_webmode_btn.ps1` 新規作成＋診断ログ `[webmode-btn]` 追加）:**
+  - 復帰ボタンは独立 Topmost ウィンドウ（48x48）。位置・表示状態は正常
+  - 切替直後は topmost 帯内で復帰ボタンがメインより上（前面）＝見える
+  - **Webページをクリックした瞬間にメインウィンドウがアクティベートされ、WPF が Topmost を再アサート（`SetWindowPos(HWND_TOPMOST)`）して topmost 帯内でメインが最前面に上がる** → 復帰ボタンが WebView2 の下に隠れる（`WindowFromPoint` が `Chrome_RenderWidgetHostHWND` を返す）
+- **修正:**
+  - Webモード中に 400ms 間隔の `DispatcherTimer`（`_webModePinTimer`）を起動し、topmost 帯の Z-order を走査して復帰ボタンがメインより下になっていれば `BringToFront` で再固定（`PinWebModeButtonAboveMain()`）
+  - Webモードに入ったらタイマー開始（`StartWebModePinTimer()`）、ウィンドウモードに戻ったら停止（`StopWebModePinTimer()`）
+  - 診断ログ: `[webmode-btn]`（復帰ボタンの矩形・Z-order、再固定検出時）
+- **テスト計画（ユーザー指定手順）:** 起動 → ウィンドウ移動 → Web操作モード → （Web操作）→ 復帰ボタンクリック → 起動時状態（ウィンドウ移動可）
+- **結果（2026-08-29 実測、`tools/test_webmode_btn.ps1`）:**
+
+| フェーズ | 内容 | 修正前 | 修正後 |
+|---|---|---|---|
+| A | 起動後ドラッグ移動 | OK | OK |
+| B | ⚡ クリック → Webモード・復帰ボタン表示確認 | OK（切替直後は前面） | OK |
+| C | Webページクリック後・復帰ボタン再確認 | **BUG（メインの下に隠れる）** | **OK（re-pinning で前面維持）** |
+| D | 復帰ボタンクリック → ウィンドウモード復帰 | BUG（クリック不能） | OK（`WS_EX_TRANSPARENT=True`） |
+| E | 再度ドラッグ → 起動時状態に戻っているか | FAILED | OK |
+
+  - 回帰確認: `tools/test_hover_after_drag.ps1` 全フェーズ OK（#8 の修正に影響なし）
+  - **実マウスでの最終確認: 完了**（Web操作モードで Web ページを操作しても復帰ボタンが表示され続け、クリックで戻りウィンドウ移動できることをユーザーが確認）
+  - `tools/test_diag.ps1` / `test_input.ps1` / `test_toggle.ps1` の `$proj` が旧パス（`d:\SynologyDrive\...`）を指していたため現ワークスペースへ更新（`D:\WhitebearATOM1\DGXSparkUtilWidget` は `D:\SynologyDrive\WhitebearATOM1\DGXSparkUtilWidget` へのシンボリックリンクで、内容は同一）
+
+---
+
 ### 現在の tools/ 構成
 
 ```
@@ -137,6 +165,7 @@ tools/
 ├── test_input.ps1           # 入力遮断検証
 ├── test_drag.ps1            # ドラッグ移動検証
 ├── test_hover_after_drag.ps1 # ドラッグ後のホバー再現テスト（#8 で追加）
+├── test_webmode_btn.ps1      # Web操作モードの復帰ボタン検証（#9 で追加）
 └── test_toggle.ps1          # Web 切替往復検証
 ```
 
