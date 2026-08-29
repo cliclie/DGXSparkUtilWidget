@@ -87,7 +87,7 @@
                     Style="{StaticResource ControlButtonStyle}"
                     ToolTip="設定">
                 <Viewbox Width="18" Height="18">
-                    <Path Data="M 4,7 L 24,7 M 4,12 L 24,12 M 4,17 L 24,17"
+                    <Path Data="M 0,4 L 18,4 M 0,9 L 18,9 M 0,16 L 18,16"
                           Stroke="#444444" StrokeThickness="2"/>
                 </Viewbox>
             </Button>
