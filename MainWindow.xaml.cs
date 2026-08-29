@@ -491,6 +491,8 @@ namespace DGXSparkUtilWidget
             }
             if (!_isDragging)
             {
+                // エッジ帯の上ならリサイズカーソル（縦/横/コーナー）を表示する
+                _overlay.Cursor = GetResizeCursor(GetResizeEdge(e.GetPosition(_overlay)));
                 // レベルトリガー: カーソルがウィンドウ内で動いている限りバーを表示する。
                 // ドラッグ終了後に WPF の enter/leave 追跡が停止しても（エッジイベントが発火しなくても）
                 // カーソルの移動だけでバーが再表示・再固定される。
@@ -573,6 +575,18 @@ namespace DGXSparkUtilWidget
             if (p.Y <= ResizeBand) edge |= ResizeEdge.Top;
             else if (p.Y >= Height - ResizeBand) edge |= ResizeEdge.Bottom;
             return edge;
+        }
+
+        /// <summary>リサイズエッジに対応するカーソルを返す（コーナーは斜め両方向）。</summary>
+        private static Cursor GetResizeCursor(ResizeEdge edge)
+        {
+            bool l = (edge & ResizeEdge.Left) != 0, r = (edge & ResizeEdge.Right) != 0;
+            bool t = (edge & ResizeEdge.Top) != 0, b = (edge & ResizeEdge.Bottom) != 0;
+            if ((l && t) || (r && b)) return Cursors.SizeNWSE;
+            if ((r && t) || (l && b)) return Cursors.SizeNESW;
+            if (l || r) return Cursors.SizeWE;
+            if (t || b) return Cursors.SizeNS;
+            return Cursors.Arrow;
         }
 
         /// <summary>リサイズドラッグ中、カーソルの画面移動量（DIP）からメインウィンドウの Left/Top/Width/Height を更新する。</summary>
@@ -708,7 +722,7 @@ namespace DGXSparkUtilWidget
                     SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
                 };
                 band.MouseDown += (s, e) => Band_MouseDown(captured, e);
-                band.MouseMove += (s, e) => Band_MouseMove();
+                band.MouseMove += (s, e) => { UpdateBandCursor(captured, edge); Band_MouseMove(); };
                 band.MouseUp += (s, e) => Band_MouseUp(captured, e);
                 bands[i] = band;
             }
@@ -794,6 +808,30 @@ namespace DGXSparkUtilWidget
             }
             LogDebug($"band MouseDown (resize start) edge={edge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
             band.CaptureMouse();
+        }
+
+        /// <summary>リサイズ帯の上でコーナー領域（角 16px）にいると斜めカーソルを表示する。</summary>
+        private void UpdateBandCursor(Window band, ResizeEdge captured)
+        {
+            if (_isResizing) return;
+            // Screen 座標でコーナー判定する
+            GetCursorPos(out POINT p);
+            var src = (HwndSource)PresentationSource.FromVisual(this);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            double mx = p.X / sx, my = p.Y / sy;
+            const double corner = 16;
+            bool l = (captured & ResizeEdge.Left) != 0, r = (captured & ResizeEdge.Right) != 0;
+            bool t = (captured & ResizeEdge.Top) != 0, b = (captured & ResizeEdge.Bottom) != 0;
+            bool atCorner = false;
+            if (l && t) atCorner = mx <= Left + corner && my <= Top + corner;
+            else if (r && t) atCorner = mx >= Left + Width - corner && my <= Top + corner;
+            else if (l && b) atCorner = mx <= Left + corner && my >= Top + Height - corner;
+            else if (r && b) atCorner = mx >= Left + Width - corner && my >= Top + Height - corner;
+            var cursor = atCorner ? ((l && t || r && b) ? Cursors.SizeNWSE : Cursors.SizeNESW)
+                                  : (l || r ? Cursors.SizeWE : Cursors.SizeNS);
+            band.Cursor = cursor;
+            if (band.Content is FrameworkElement fe) fe.Cursor = cursor; // 子要素の既定カーソルを上書き
         }
 
         private void Band_MouseMove()
@@ -934,12 +972,12 @@ namespace DGXSparkUtilWidget
             PositionResizeBands();
         }
 
-        /// <summary>浮遊コントロールバーを右上に配置する。復帰ボタン（右端 56px）と重ならないよう 64px オフセットする。</summary>
+        /// <summary>浮遊コントロールバーを右上に配置する。Webモードの復帰ボタンと同じアンカー（右端56px・上8px）で揃える。</summary>
         private void PositionControlBar()
         {
             if (_controlBar is not { Visibility: Visibility.Visible }) return;
-            _controlBar.Left = Left + Width - _controlBar.Width - 64;
-            _controlBar.Top = Top + 4;
+            _controlBar.Left = Left + Width - _controlBar.Width - 56;
+            _controlBar.Top = Top + 8;
         }
 
         /// <summary>
@@ -957,8 +995,8 @@ namespace DGXSparkUtilWidget
             {
                 var button = new Button
                 {
-                    Width = 40,
-                    Height = 40,
+                    Width = 46,
+                    Height = 32,
                     Cursor = Cursors.Hand,
                     ToolTip = "ウィンドウ操作に戻る",
                     Template = CreateReturnButtonTemplate(),
@@ -980,12 +1018,12 @@ namespace DGXSparkUtilWidget
                     Background = Brushes.Transparent,
                     Topmost = true,
                     ShowInTaskbar = false,
-                    Width = 48,
-                    Height = 48,
+                    Width = 50,
+                    Height = 32,
                     Content = button,
                 };
             }
-            _webModeButtonWindow.Left = Left + Width - 48 - 8;
+            _webModeButtonWindow.Left = Left + Width - 56;
             _webModeButtonWindow.Top = Top + 8;
             _webModeButtonWindow.Show();
             _webModeButtonWindow.Activate();

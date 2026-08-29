@@ -153,8 +153,8 @@ try {
     [void][Native]::SetCursorPos($hx, $hy); Start-Sleep -Milliseconds 900
     $bar = ([Native]::GetAppWindows() | Sort-Object { ($_.Rect.Right-$_.Rect.Left)*($_.Rect.Bottom-$_.Rect.Top) } | Select-Object -First 1)
     if ($null -eq $bar -or (($bar.Rect.Bottom - $bar.Rect.Top) -ge 100)) { Write-Host "PHASE E: NG - control bar not found"; exit 1 }
-    # Web操作トグル（5番目のボタン）中心 = バー左端 + (2+4*36+16) * DPI
-    $webBtnX = [int]($bar.Rect.Left + (162 * $S)); $webBtnY = [int](($bar.Rect.Top + $bar.Rect.Bottom)/2)
+    # Web操作トグル（5番目のボタン）中心 = バー左端 + (2+4*50+16) * DPI（46pxボタン・余白2px）
+    $webBtnX = [int]($bar.Rect.Left + (225 * $S)); $webBtnY = [int](($bar.Rect.Top + $bar.Rect.Bottom)/2)
     Click-At $webBtnX $webBtnY
     Start-Sleep -Milliseconds 500
     $rg = Get-MainRect
@@ -175,8 +175,8 @@ try {
     $rh = Get-MainRect; $oh = Get-OvRect
     $dw2 = ($rh.Right - $rh.Left) - ($rg.Right - $rg.Left); $dh2 = ($rh.Bottom - $rh.Top) - ($rg.Bottom - $rg.Top)
     $followF = ([math]::Abs(($oh.Right-$oh.Left) - ($rh.Right-$rh.Left))) -lt 3
-    # 復帰ボタン（48x48・右上）が新しい右上に追従しているか
-    $btn = [Native]::GetAppWindows() | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 40 -and ($_.Rect.Bottom - $_.Rect.Top) -le 60 } | Select-Object -First 1
+    # 復帰ボタン（50x32・右上）が新しい右上に追従しているか
+    $btn = [Native]::GetAppWindows() | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 28 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 } | Select-Object -First 1
     $btnOk = ($null -ne $btn) -and ([math]::Abs($btn.Rect.Right - $rh.Right) -lt 20) -and ([math]::Abs($btn.Rect.Top - $rh.Top) -lt 20)
     $verdictF = if (($dw2 -ge 60) -and ($dh2 -ge 45) -and $followF -and $btnOk) { "OK" } else { "NG" }
     Write-Host ("PHASE F: web-mode corner resize dW={0} dH={1}, overlay follows={2}, return button follows={3} -> {4}" -f `
