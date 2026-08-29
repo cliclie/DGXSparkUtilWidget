@@ -39,6 +39,22 @@ namespace DGXSparkUtilWidget
         private Point _dragStartScreenMouse;
         private Point _dragStartPos;
 
+        // リサイズ（エッジドラッグ）状態
+        private const double ResizeBand = 8;      // エッジのリサイズ帯幅（DIP）
+        private const double ResizeMinWidth = 400;   // リサイズ時の最小幅
+        private const double ResizeMinHeight = 300;  // リサイズ時の最小高さ
+        private bool _isResizing;
+        private int _resizeEdge;                  // ResizeEdge ビットマスク
+        private Point _resizeStartScreenMouse;
+        private Rect _resizeStartBounds;          // ドラッグ開始時の Left/Top/Width/Height
+
+        [Flags]
+        private enum ResizeEdge { None = 0, Left = 1, Right = 2, Top = 4, Bottom = 8 }
+
+        // Webモード用リサイズ帯ウィンドウ（上/下/左/右）。Webモードではフルオーバーレイを非表示にし、
+        // 外側 ResizeBand px の帯だけを表示してリサイズを受け取る（中心は WebView2 に直接届く）。
+        private Window[] _resizeBands = null!;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -54,6 +70,7 @@ namespace DGXSparkUtilWidget
 
             _controlBar = CreateControlBarWindow();
             _overlay = CreateOverlayWindow();
+            _resizeBands = CreateResizeBands();
 
             // メインウィンドウの WM_NCHITTEST をフック。ウィンドウモードでは HTTRANSPARENT を返し、
             // WebView2 のネイティブ子HWND（Chrome_WidgetWin_* 等、別プロセスのウィンドウ）を含めて
@@ -84,11 +101,14 @@ namespace DGXSparkUtilWidget
                 if (WindowState == WindowState.Minimized)
                 {
                     _overlay.Hide();
+                    foreach (var b in _resizeBands) b.Hide();
                     _controlBar.Hide();
                     _webModeButtonWindow?.Hide();
                 }
                 else if (_isWebMode)
                 {
+                    // 最小化復帰時: リサイズ帯と復帰ボタンを再表示・再配置する
+                    ShowResizeBands();
                     ShowWebModeButtonWindow();
                 }
                 else
@@ -221,6 +241,8 @@ namespace DGXSparkUtilWidget
         /// <summary>フローティングコントロールバーを隠す（ディレイ付き）。完全にフェードアウトしたらウィンドウ自体も非表示にする。</summary>
         private void HideControlBar()
         {
+            // リサイズ中はエッジ（右上隅付近）からドラッグするため、バーが自動非表示にならないよう無視する
+            if (_isResizing) return;
             _hideTimer?.Stop();
             _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
             _hideTimer.Tick += (s, e) =>
@@ -326,19 +348,23 @@ namespace DGXSparkUtilWidget
 
             if (webMode)
             {
-                // Web操作モード: オーバーレイを除去しネイティブHWNDが直接入力を受け取る。
-                // コントロールバーを非表示、復帰ボタン（独立ミニウィンドウ）を表示。
-                HideOverlay();
+                // Web操作モード: WebView2 が直接入力を受け取る。復帰ボタン（独立ミニウィンドウ）を表示。
+                // フルオーバーレイは非表示にし、外側8pxのリサイズ帯ウィンドウ4本だけを表示して
+                // エッジドラッグリサイズを可能にする（中心のクリックは WebView2 に直接届く）。
+                _overlay.Hide();
+                ShowResizeBands();
                 _hideTimer?.Stop();
                 _controlBar.Hide();
                 ShowWebModeButtonWindow();
                 SetMainHitTestTransparent(false); // メインウィンドウをヒットテスト可能に（Web が操作可能に）
+                PinWebModeButtonAboveMain(); // 初期状態から「ボタン > リサイズ帯 > メイン」を保証する
             }
             else
             {
                 // ウィンドウ操作モード: オーバーレイを表示しマウス入力をすべてキャプチャ（Webページは操作不可）。
-                // 復帰ボタンを非表示。コントロールバーはホバー時に表示される（オーバーレイの MouseEnter）。
+                // 復帰ボタン・リサイズ帯を非表示。コントロールバーはホバー時に表示される（オーバーレイの MouseEnter）。
                 ShowOverlay();
+                foreach (var b in _resizeBands) b.Hide();
                 HideWebModeButtonWindow();
                 StopWebModePinTimer();
                 // Webモードから戻った直後は、操作した場所の近く（右上）にコントロールバーを即表示する
@@ -421,22 +447,54 @@ namespace DGXSparkUtilWidget
         private void Overlay_MouseDown(object sender, MouseButtonEventArgs e)
         {
             if (e.ChangedButton != MouseButton.Left || e.ButtonState != MouseButtonState.Pressed) return;
-            _isDragging = true;
             GetCursorPos(out POINT p);
-            _dragStartScreenMouse = new Point(p.X, p.Y);
-            _dragStartPos = new Point(Left, Top);
+            var pos = new Point(p.X, p.Y);
+
+            // エッジ帯内ならリサイズドラッグ、それ以外なら移動ドラッグ
+            var edge = GetResizeEdge(e.GetPosition(_overlay));
+            if (edge != ResizeEdge.None)
+            {
+                _isResizing = true;
+                _resizeEdge = (int)edge;
+                _resizeStartScreenMouse = pos;
+                _resizeStartBounds = new Rect(Left, Top, Width, Height);
+                // 最大化状態からのリサイズはまず通常サイズへ復元してから開始する
+                if (_isMaximized)
+                {
+                    Left = _normalBounds.Left;
+                    Top = _normalBounds.Top;
+                    Width = _normalBounds.Width;
+                    Height = _normalBounds.Height;
+                    _resizeStartBounds = new Rect(Left, Top, Width, Height);
+                    _isMaximized = false;
+                    _controlBar.SetMaximizeIcon(false);
+                }
+                LogDebug($"overlay MouseDown (resize start) edge={edge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
+            }
+            else
+            {
+                _isDragging = true;
+                _dragStartScreenMouse = pos;
+                _dragStartPos = new Point(Left, Top);
+                LogDebug($"overlay MouseDown (drag start) main=({Left},{Top})");
+            }
             _overlay.CaptureMouse();
-            LogDebug($"overlay MouseDown (drag start) main=({Left},{Top})");
         }
 
         private void Overlay_MouseMove(object sender, MouseEventArgs e)
         {
+            if (_isResizing)
+            {
+                var d = GetResizeDeltaDip();
+                ApplyResize(d.dx, d.dy);
+                return;
+            }
             if (!_isDragging)
             {
                 // レベルトリガー: カーソルがウィンドウ内で動いている限りバーを表示する。
                 // ドラッグ終了後に WPF の enter/leave 追跡が停止しても（エッジイベントが発火しなくても）
                 // カーソルの移動だけでバーが再表示・再固定される。
-                ShowControlBar();
+                if (!_isWebMode) ShowControlBar();
                 return;
             }
             GetCursorPos(out POINT cur);
@@ -454,8 +512,118 @@ namespace DGXSparkUtilWidget
 
         private void Overlay_MouseUp(object sender, MouseButtonEventArgs e)
         {
+            if (_isResizing)
+            {
+                LogDebug($"overlay MouseUp (resize end) bounds=({Left},{Top},{Width:F0}x{Height:F0})");
+            }
             _isDragging = false;
+            _isResizing = false;
+            _resizeEdge = 0;
             _overlay.ReleaseMouseCapture();
+            // ドラッグ（移動/リサイズ）終了後に WPF のホバー追跡（enter/leave）が停止して、
+            // 次回入場時に MouseEnter/MouseMove が発火しないことがある。原因は、ドラッグ中に
+            // カーソルがオーバーレイ以外のウィンドウ上を通過すると WM_MOUSEMOVE が届かず、
+            // WPF のホバー状態が実カーソル位置と乖離するため。カーソルを一瞬外へ出して再入場させ、
+            // 確実な enter/leave を発生させてホバー状態をリシンクする（1フレーム内の往復で視覚影響は最小）。
+            GetCursorPos(out POINT up);
+            var src = (HwndSource)PresentationSource.FromVisual(_overlay);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            double mx = up.X / sx, my = up.Y / sy;
+            bool inside = (mx >= Left && mx <= Left + Width && my >= Top && my <= Top + Height);
+            if (inside)
+            {
+                // 内側で終了: 近接エッジの外へ一瞬出す（16px）
+                double dTop = my - Top, dBottom = Top + Height - my;
+                double dLeft = mx - Left, dRight = Left + Width - mx;
+                double minD = Math.Min(Math.Min(dTop, dBottom), Math.Min(dLeft, dRight));
+                int outX = up.X, outY = up.Y;
+                if (minD == dTop) outY = (int)Math.Round(Top - 16 * sy);
+                else if (minD == dBottom) outY = (int)Math.Round(Top + Height + 16 * sy);
+                else if (minD == dLeft) outX = (int)Math.Round(Left - 16 * sx);
+                else outX = (int)Math.Round(Left + Width + 16 * sx);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    SetCursorPos(outX, outY);
+                    SetCursorPos(up.X, up.Y);
+                }), System.Windows.Threading.DispatcherPriority.Input);
+            }
+            else
+            {
+                // 外側で終了: 内側へ一瞬戻す（角から24px内側）
+                int insideX, insideY;
+                if (my < Top) { insideX = (int)Math.Round(Left + 24 * sx); insideY = (int)Math.Round(Top + 24 * sy); }
+                else if (my > Top + Height) { insideX = (int)Math.Round(Left + 24 * sx); insideY = (int)Math.Round(Top + Height - 24 * sy); }
+                else if (mx < Left) { insideX = (int)Math.Round(Left + 24 * sx); insideY = up.Y; }
+                else { insideX = (int)Math.Round(Left + Width - 24 * sx); insideY = up.Y; }
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    SetCursorPos(insideX, insideY);
+                    SetCursorPos(up.X, up.Y);
+                }), System.Windows.Threading.DispatcherPriority.Input);
+            }
+        }
+
+        /// <summary>ウィンドウ内座標（DIP）からリサイズエッジを判定する。帯幅は ResizeBand。</summary>
+        private ResizeEdge GetResizeEdge(Point p)
+        {
+            var edge = ResizeEdge.None;
+            if (p.X <= ResizeBand) edge |= ResizeEdge.Left;
+            else if (p.X >= Width - ResizeBand) edge |= ResizeEdge.Right;
+            if (p.Y <= ResizeBand) edge |= ResizeEdge.Top;
+            else if (p.Y >= Height - ResizeBand) edge |= ResizeEdge.Bottom;
+            return edge;
+        }
+
+        /// <summary>リサイズドラッグ中、カーソルの画面移動量（DIP）からメインウィンドウの Left/Top/Width/Height を更新する。</summary>
+        private void ApplyResize(double dx, double dy)
+        {
+            double left = _resizeStartBounds.Left, top = _resizeStartBounds.Top;
+            double width = _resizeStartBounds.Width, height = _resizeStartBounds.Height;
+            if ((_resizeEdge & (int)ResizeEdge.Left) != 0)
+            {
+                width = Math.Max(ResizeMinWidth, _resizeStartBounds.Width - dx);
+                left = _resizeStartBounds.Right - width;
+            }
+            if ((_resizeEdge & (int)ResizeEdge.Right) != 0)
+            {
+                width = Math.Max(ResizeMinWidth, _resizeStartBounds.Width + dx);
+            }
+            if ((_resizeEdge & (int)ResizeEdge.Top) != 0)
+            {
+                height = Math.Max(ResizeMinHeight, _resizeStartBounds.Height - dy);
+                top = _resizeStartBounds.Bottom - height;
+            }
+            if ((_resizeEdge & (int)ResizeEdge.Bottom) != 0)
+            {
+                height = Math.Max(ResizeMinHeight, _resizeStartBounds.Height + dy);
+            }
+
+            Left = left;
+            Top = top;
+            Width = width;
+            Height = height;
+            // Webモードではリサイズ帯ウィンドウ4本を新しい矩形に同期する
+            // （ウィンドウモードでは SizeChanged -> UpdateFloatingWindows が追従する）
+            if (_isWebMode)
+            {
+                PositionResizeBands();
+                PositionWebModeButtonWindow();
+            }
+        }
+
+        /// <summary>
+        /// ドラッグ開始点からのカーソル画面移動量（DIP）を返す。
+        /// ウィンドウ/帯の座標基準にすると、左・上エッジドラッグでウィンドウ自体が動くため
+        /// delta が半分になってしまうので、必ず画面座標基準を使う。
+        /// </summary>
+        private (double dx, double dy) GetResizeDeltaDip()
+        {
+            GetCursorPos(out POINT cur);
+            var src = (HwndSource)PresentationSource.FromVisual(this);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            return ((cur.X - _resizeStartScreenMouse.X) / sx, (cur.Y - _resizeStartScreenMouse.Y) / sy);
         }
 
         private void ShowOverlay()
@@ -508,14 +676,148 @@ namespace DGXSparkUtilWidget
             }
         }
 
-        private void HideOverlay()
+        /// <summary>
+        /// Webモード用リサイズ帯ウィンドウ4本（上/下/左/右）を生成する。
+        /// 幅または高さが ResizeBand px の薄い Topmost ウィンドウで、見た目は完全に透明。
+        /// Webモードではこれらだけがマウス入力を受け取り、中心は WebView2 に直接届く。
+        /// </summary>
+        private Window[] CreateResizeBands()
         {
-            _overlay.Hide();
+            var hitTestBrush = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+            ResizeEdge[] edges = { ResizeEdge.Top, ResizeEdge.Bottom, ResizeEdge.Left, ResizeEdge.Right };
+            var bands = new Window[4];
+            for (int i = 0; i < 4; i++)
+            {
+                ResizeEdge edge = edges[i];
+                var band = new Window
+                {
+                    WindowStyle = WindowStyle.None,
+                    AllowsTransparency = true,
+                    Background = hitTestBrush,
+                    Content = new Border { Background = hitTestBrush },
+                    Topmost = true,
+                    ShowInTaskbar = false,
+                    ResizeMode = ResizeMode.NoResize,
+                    Cursor = (edge == ResizeEdge.Left || edge == ResizeEdge.Right) ? Cursors.SizeWE : Cursors.SizeNS,
+                };
+                Window captured = band; // クロージャで対象ウィンドウを保持（キャプチャ中は sender が変わっても安全）
+                band.Loaded += (s, e) =>
+                {
+                    IntPtr h = new WindowInteropHelper(band).EnsureHandle();
+                    int ex = GetWindowLong(h, GWL_EXSTYLE);
+                    SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+                };
+                band.MouseDown += (s, e) => Band_MouseDown(captured, e);
+                band.MouseMove += (s, e) => Band_MouseMove();
+                band.MouseUp += (s, e) => Band_MouseUp(captured, e);
+                bands[i] = band;
+            }
+            return bands;
+        }
+
+        /// <summary>リサイズ帯を表示し、復帰ボタンの直下（= メインの直上）に Z-order 固定する。</summary>
+        private void ShowResizeBands()
+        {
+            // 必ず Show() より前に矩形を設定する。WPF は Show() 時点のサイズでウィンドウを生成するため、
+            // 未設定（0x0）のまま表示するとヒットテスト対象にならずリサイズ不能になる。
+            PositionResizeBands();
+            foreach (var b in _resizeBands)
+            {
+                if (!b.IsVisible) b.Show();
+            }
+            IntPtr bh = _webModeButtonWindow is not null
+                ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle()
+                : new WindowInteropHelper(this).EnsureHandle();
+            foreach (var b in _resizeBands)
+            {
+                SetWindowPos(new WindowInteropHelper(b).EnsureHandle(), bh,
+                    0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            LogResizeBands();
+        }
+
+        /// <summary>リサイズ帯の HWND・矩形を診断ログに出力する。</summary>
+        private void LogResizeBands()
+        {
+            try
+            {
+                string[] names = { "top", "bottom", "left", "right" };
+                for (int i = 0; i < _resizeBands.Length; i++)
+                {
+                    var b = _resizeBands[i];
+                    IntPtr h = new WindowInteropHelper(b).EnsureHandle();
+                    RECT r;
+                    GetWindowRect(h, out r);
+                    LogDebug($"[band] {names[i]}=0x{h.ToInt64():X} visible={b.IsVisible} rect=({r.Left},{r.Top})-({r.Right},{r.Bottom})");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogDebug("[band] 診断失敗: " + ex.Message);
+            }
+        }
+
+        /// <summary>リサイズ帯4本をメインウィンドウの各辺に沿って配置する（Webモード時のみ有効）。</summary>
+        private void PositionResizeBands()
+        {
+            if (!_isWebMode) return;
+            double w = Width, h = Height;
+            _resizeBands[0].Width = w; _resizeBands[0].Height = ResizeBand; _resizeBands[0].Left = Left; _resizeBands[0].Top = Top;                     // 上
+            _resizeBands[1].Width = w; _resizeBands[1].Height = ResizeBand; _resizeBands[1].Left = Left; _resizeBands[1].Top = Top + h - ResizeBand;    // 下
+            _resizeBands[2].Width = ResizeBand; _resizeBands[2].Height = h; _resizeBands[2].Left = Left; _resizeBands[2].Top = Top;                     // 左
+            _resizeBands[3].Width = ResizeBand; _resizeBands[3].Height = h; _resizeBands[3].Left = Left + w - ResizeBand; _resizeBands[3].Top = Top;    // 右
+        }
+
+        /// <summary>帯からのリサイズドラッグ開始。エッジはメインウィンドウに対するカーソル位置で判定する（コーナーで幅・高の両次元に対応）。</summary>
+        private void Band_MouseDown(Window band, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton != MouseButton.Left || e.ButtonState != MouseButtonState.Pressed) return;
+            GetCursorPos(out POINT p);
+            var src = (HwndSource)PresentationSource.FromVisual(this);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            var edge = GetResizeEdge(new Point(p.X / sx - Left, p.Y / sy - Top));
+            _isResizing = true;
+            _resizeEdge = (int)edge;
+            _resizeStartScreenMouse = new Point(p.X, p.Y);
+            _resizeStartBounds = new Rect(Left, Top, Width, Height);
+            // 最大化状態からのリサイズはまず通常サイズへ復元してから開始する
+            if (_isMaximized)
+            {
+                Left = _normalBounds.Left;
+                Top = _normalBounds.Top;
+                Width = _normalBounds.Width;
+                Height = _normalBounds.Height;
+                _resizeStartBounds = new Rect(Left, Top, Width, Height);
+                _isMaximized = false;
+                _controlBar.SetMaximizeIcon(false);
+            }
+            LogDebug($"band MouseDown (resize start) edge={edge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
+            band.CaptureMouse();
+        }
+
+        private void Band_MouseMove()
+        {
+            if (!_isResizing) return;
+            var d = GetResizeDeltaDip();
+            ApplyResize(d.dx, d.dy);
+        }
+
+        private void Band_MouseUp(Window band, MouseButtonEventArgs e)
+        {
+            LogDebug($"band MouseUp (resize end) bounds=({Left},{Top},{Width:F0}x{Height:F0})");
+            _isResizing = false;
+            _resizeEdge = 0;
+            band.ReleaseMouseCapture();
         }
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetCursorPos(out POINT pt);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetCursorPos(int X, int Y);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT { public int X; public int Y; }
@@ -629,12 +931,14 @@ namespace DGXSparkUtilWidget
             _overlay.Height = Height;
             PositionControlBar();
             PositionWebModeButtonWindow();
+            PositionResizeBands();
         }
 
+        /// <summary>浮遊コントロールバーを右上に配置する。復帰ボタン（右端 56px）と重ならないよう 64px オフセットする。</summary>
         private void PositionControlBar()
         {
             if (_controlBar is not { Visibility: Visibility.Visible }) return;
-            _controlBar.Left = Left + Width - _controlBar.Width - 4;
+            _controlBar.Left = Left + Width - _controlBar.Width - 64;
             _controlBar.Top = Top + 4;
         }
 
@@ -711,25 +1015,42 @@ namespace DGXSparkUtilWidget
             _webModePinTimer?.Stop();
         }
 
-        /// <summary>復帰ボタンがメインより下（手前でない）になっていれば最前面へ戻す。</summary>
+        /// <summary>復帰ボタン・リサイズ帯がすべてメインより上（正しいZ-order）にあることを維持する。</summary>
         private void PinWebModeButtonAboveMain()
         {
             if (!_isWebMode) return;
-            if (_webModeButtonWindow is not { IsVisible: true }) return;
             try
             {
-                IntPtr bh = new WindowInteropHelper(_webModeButtonWindow).EnsureHandle();
+                IntPtr bh = _webModeButtonWindow is not null
+                    ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle()
+                    : IntPtr.Zero;
                 IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
-                // topmost 帯の先頭から走査: メインに先に当たればボタンはメインより下
+                // topmost 帯の先頭から走査し、メインより上（前面）にある HWND を集める。
+                // 復帰ボタンの位置だけで打ち切ると「ボタン > メイン > リサイズ帯」の違反を見逃すため、
+                // メインに当たるまで必ず走査しきる。
+                var aboveMain = new HashSet<IntPtr>();
                 IntPtr h = GetTopWindow(IntPtr.Zero);
                 for (int i = 0; h != IntPtr.Zero && i < 200; i++)
                 {
-                    if (h == bh) return; // ボタンがメインより上 = OK
-                    if (h == mh) break;
+                    if (h == mh) break; // ここより下はメインの裏側
+                    aboveMain.Add(h);
                     h = GetWindow(h, GW_HWNDNEXT);
                 }
-                LogDebug("[webmode-btn] z-order violation detected -> re-pinning button above main");
-                BringToFront(bh);
+                bool needPin = false;
+                if (_webModeButtonWindow is { IsVisible: true } && !aboveMain.Contains(bh)) needPin = true;
+                foreach (var b in _resizeBands)
+                {
+                    if (b.IsVisible && !aboveMain.Contains(new WindowInteropHelper(b).EnsureHandle())) { needPin = true; break; }
+                }
+                if (!needPin) return;
+                LogDebug("[webmode-btn] z-order violation detected -> re-pinning (button>bands>main)");
+                // メインを帯の最前へ上げてから、リサイズ帯 > 復帰ボタンの順で前面に再固定する
+                SetWindowPos(mh, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); // HWND_TOP
+                foreach (var b in _resizeBands)
+                {
+                    if (b.IsVisible) BringToFront(new WindowInteropHelper(b).EnsureHandle());
+                }
+                if (_webModeButtonWindow is { IsVisible: true }) BringToFront(bh);
             }
             catch
             {
