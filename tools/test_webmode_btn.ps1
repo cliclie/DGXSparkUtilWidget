@@ -192,10 +192,10 @@ try {
     $cx2 = [int](($r2.Left + $r2.Right) / 2); $cy2 = [int](($r2.Top + $r2.Bottom) / 2)
     [void][Native]::SetCursorPos($cx2, $cy2)
     Start-Sleep -Milliseconds 900   # 繧ｳ繝ｳ繝医Ο繝ｼ繝ｫ繝舌・陦ｨ遉ｺ蠕・■・医Ξ繝吶Ν繝医Μ繧ｬ繝ｼ・・
-    # Locate control bar dynamically (h 24-40px app window); WebToggle = 5th button center = bar Left + 225px (46px buttons, 2px margins)
+    # Locate control bar dynamically (h 24-40px app window); WebToggle = 1st button center = bar Left + 23px (46px buttons, no margins)
     $barB = [Native2]::GetAppWindows() | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 24 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 -and ($_.Rect.Right - $_.Rect.Left) -gt 100 } | Select-Object -First 1
     if ($null -eq $barB) { Write-Host "PHASE B: BUG - control bar not found"; exit 1 }
-    $togX = [int]($barB.Rect.Left + (225 * $S)); $togY = [int](($barB.Rect.Top + $barB.Rect.Bottom) / 2)
+    $togX = [int]($barB.Rect.Left + (23 * $S)); $togY = [int](($barB.Rect.Top + $barB.Rect.Bottom) / 2)
     Write-Host "PHASE B: clicking WebToggle at ($togX,$togY)"
     Click-Point $togX $togY
     Start-Sleep -Seconds 1

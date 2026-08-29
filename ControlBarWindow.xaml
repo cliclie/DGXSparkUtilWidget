@@ -1,7 +1,7 @@
 <Window x:Class="DGXSparkUtilWidget.ControlBarWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="250" Height="32"
+        Width="230" Height="32"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
@@ -14,7 +14,7 @@
         <Style x:Key="ControlButtonStyle" TargetType="Button">
             <Setter Property="Width" Value="46"/>
             <Setter Property="Height" Value="32"/>
-            <Setter Property="Margin" Value="2,0"/>
+            <Setter Property="Margin" Value="0"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Background" Value="Transparent"/>
@@ -71,47 +71,57 @@
 
     <Border CornerRadius="8" Background="#99FFFFFF">
         <StackPanel Orientation="Horizontal">
-            <!-- 最小化ボタン -->
-            <Button x:Name="BtnMinimize"
+            <!-- Web操作トグルボタン -->
+            <Button x:Name="BtnWebToggle"
                     Style="{StaticResource ControlButtonStyle}"
-                    ToolTip="最小化">
-                <Path Data="M 4,16 L 24,16"
-                      Stroke="#444444" StrokeThickness="2"/>
-            </Button>
-
-            <!-- 最大化/元に戻すボタン -->
-            <Button x:Name="BtnMaximizeRestore"
-                    Style="{StaticResource ControlButtonStyle}"
-                    ToolTip="最大化 / 元に戻す">
-                <Path x:Name="IconMaximize"
-                      Data="M 5,5 L 23,5 L 23,23 L 5,23 Z"
-                      Stroke="#444444" StrokeThickness="2"
-                      Fill="Transparent"/>
-            </Button>
-
-            <!-- 閉じるボタン -->
-            <Button x:Name="BtnClose"
-                    Style="{StaticResource CloseButtonStyle}"
-                    ToolTip="閉じる">
-                <Path Data="M 8,8 L 20,20 M 20,8 L 8,20"
-                      Stroke="#444444" StrokeThickness="2"/>
+                    ToolTip="Webページ操作を有効化">
+                <Viewbox Width="18" Height="18">
+                    <Path Data="M 6,3 L 6,19 L 11,14 L 15,21 L 18,19 L 14,12 L 20,10 Z"
+                          Stroke="#444444" StrokeThickness="1.5"
+                          Fill="Transparent"/>
+                </Viewbox>
             </Button>
 
             <!-- ハンバーガーメニューボタン -->
             <Button x:Name="BtnMenu"
                     Style="{StaticResource ControlButtonStyle}"
                     ToolTip="設定">
-                <Path Data="M 4,7 L 24,7 M 4,12 L 24,12 M 4,17 L 24,17"
-                      Stroke="#444444" StrokeThickness="2"/>
+                <Viewbox Width="18" Height="18">
+                    <Path Data="M 4,7 L 24,7 M 4,12 L 24,12 M 4,17 L 24,17"
+                          Stroke="#444444" StrokeThickness="2"/>
+                </Viewbox>
             </Button>
 
-            <!-- Web操作トグルボタン -->
-            <Button x:Name="BtnWebToggle"
+            <!-- 最小化ボタン -->
+            <Button x:Name="BtnMinimize"
                     Style="{StaticResource ControlButtonStyle}"
-                    ToolTip="Webページ操作を有効化">
-                <Path Data="M 6,3 L 6,19 L 11,14 L 15,21 L 18,19 L 14,12 L 20,10 Z"
-                      Stroke="#444444" StrokeThickness="1.5"
-                      Fill="Transparent"/>
+                    ToolTip="最小化">
+                <Viewbox Width="18" Height="18">
+                    <Path Data="M 4,16 L 24,16"
+                          Stroke="#444444" StrokeThickness="2"/>
+                </Viewbox>
+            </Button>
+
+            <!-- 最大化/元に戻すボタン -->
+            <Button x:Name="BtnMaximizeRestore"
+                    Style="{StaticResource ControlButtonStyle}"
+                    ToolTip="最大化 / 元に戻す">
+                <Viewbox Width="18" Height="18">
+                    <Path x:Name="IconMaximize"
+                          Data="M 5,5 L 23,5 L 23,23 L 5,23 Z"
+                          Stroke="#444444" StrokeThickness="2"
+                          Fill="Transparent"/>
+                </Viewbox>
+            </Button>
+
+            <!-- 閉じるボタン -->
+            <Button x:Name="BtnClose"
+                    Style="{StaticResource CloseButtonStyle}"
+                    ToolTip="閉じる">
+                <Viewbox Width="18" Height="18">
+                    <Path Data="M 8,8 L 20,20 M 20,8 L 8,20"
+                          Stroke="#444444" StrokeThickness="2"/>
+                </Viewbox>
             </Button>
         </StackPanel>
     </Border>

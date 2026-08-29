@@ -153,8 +153,8 @@ try {
     [void][Native]::SetCursorPos($hx, $hy); Start-Sleep -Milliseconds 900
     $bar = ([Native]::GetAppWindows() | Sort-Object { ($_.Rect.Right-$_.Rect.Left)*($_.Rect.Bottom-$_.Rect.Top) } | Select-Object -First 1)
     if ($null -eq $bar -or (($bar.Rect.Bottom - $bar.Rect.Top) -ge 100)) { Write-Host "PHASE E: NG - control bar not found"; exit 1 }
-    # Web操作トグル（5番目のボタン）中心 = バー左端 + (2+4*50+16) * DPI（46pxボタン・余白2px）
-    $webBtnX = [int]($bar.Rect.Left + (225 * $S)); $webBtnY = [int](($bar.Rect.Top + $bar.Rect.Bottom)/2)
+    # Web操作トグル（先頭ボタン）中心 = バー左端 + (46/2) * DPI（46pxボタン・余白なし）
+    $webBtnX = [int]($bar.Rect.Left + (23 * $S)); $webBtnY = [int](($bar.Rect.Top + $bar.Rect.Bottom)/2)
     Click-At $webBtnX $webBtnY
     Start-Sleep -Milliseconds 500
     $rg = Get-MainRect

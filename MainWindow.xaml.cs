@@ -1000,13 +1000,18 @@ namespace DGXSparkUtilWidget
                     Cursor = Cursors.Hand,
                     ToolTip = "ウィンドウ操作に戻る",
                     Template = CreateReturnButtonTemplate(),
-                    Content = new System.Windows.Shapes.Path
+                    Content = new Viewbox
                     {
-                        Data = Geometry.Parse("M 6,8 L 26,8 L 26,24 L 6,24 Z M 6,14 L 26,14"),
-                        Stroke = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
-                        StrokeThickness = 1.5,
-                        Fill = Brushes.Transparent,
-                        SnapsToDevicePixels = true,
+                        Width = 20,
+                        Height = 16,
+                        Child = new System.Windows.Shapes.Path
+                        {
+                            Data = Geometry.Parse("M 6,8 L 26,8 L 26,24 L 6,24 Z M 6,14 L 26,14"),
+                            Stroke = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)),
+                            StrokeThickness = 1.5,
+                            Fill = Brushes.Transparent,
+                            SnapsToDevicePixels = true,
+                        },
                     },
                 };
                 button.Click += (s, e) => SetWebMode(false);
@@ -1139,6 +1144,7 @@ namespace DGXSparkUtilWidget
         private static ControlTemplate CreateReturnButtonTemplate()
         {
             var border = new FrameworkElementFactory(typeof(Border));
+            border.Name = "BtnBorder";
             border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
             border.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x2E)));
             border.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x66)));
@@ -1149,7 +1155,14 @@ namespace DGXSparkUtilWidget
             content.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             border.AppendChild(content);
 
-            return new ControlTemplate(typeof(Button)) { VisualTree = border };
+            // ホバー時に背景色を変更する（コントロールバーのホバーと同様の薄い白系）
+            var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty,
+                new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF)), "BtnBorder"));
+
+            var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+            template.Triggers.Add(hoverTrigger);
+            return template;
         }
 
         private const int GWL_EXSTYLE = -20;
