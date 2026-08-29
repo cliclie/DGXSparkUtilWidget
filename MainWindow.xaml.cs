@@ -1017,7 +1017,7 @@ namespace DGXSparkUtilWidget
             PositionResizeBands();
         }
 
-        /// <summary>浮遊コントロールバーを左上に配置する。Webモードの復帰バーと同じアンカー（左端8px・上8px）で揃える。</summary>
+        /// <summary>浮遊コントロールバーを右上に配置する。Webモードの復帰バーと同じアンカー（右端8px・上8px）で揃え、同一位置で切り替わるようにする。</summary>
         private void PositionControlBar()
         {
             if (_controlBar is not { Visibility: Visibility.Visible }) return;
@@ -1052,7 +1052,10 @@ namespace DGXSparkUtilWidget
                         Height = 16,
                         Child = new System.Windows.Shapes.Path
                         {
-                            Data = Geometry.Parse("M 6,8 L 26,8 L 26,24 L 6,24 Z M 6,14 L 26,14"),
+                            // geometry は原点起点・描画実寸を Path のサイズに明示し、Viewbox が正しく中央配置する
+                            Data = Geometry.Parse("M 0.75,0.75 L 20.75,0.75 L 20.75,16.75 L 0.75,16.75 Z M 0.75,6.75 L 20.75,6.75"),
+                            Width = 21.5,
+                            Height = 17.5,
                             Stroke = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)),
                             StrokeThickness = 1.5,
                             Fill = Brushes.Transparent,

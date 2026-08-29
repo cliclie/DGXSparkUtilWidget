@@ -15,13 +15,13 @@ namespace DGXSparkUtilWidget
             InitializeComponent();
         }
 
-        /// <summary>最大化 / 元に戻すボタンのアイコンを更新する。</summary>
+        /// <summary>最大化 / 元に戻すボタンのアイコンを更新する（20x20 レイアウト・ストローク2 の座標系）。</summary>
         public void SetMaximizeIcon(bool isMaximized)
         {
             IconMaximize.Data = Geometry.Parse(
                 isMaximized
-                    ? "M 5,9 L 19,9 L 19,23 L 5,23 Z M 9,5 L 23,5 L 23,19 L 9,19 Z"
-                    : "M 5,5 L 23,5 L 23,23 L 5,23 Z");
+                    ? "M 7,1 L 19,1 L 19,13 L 7,13 Z M 1,7 L 13,7 L 13,19 L 1,19 Z"
+                    : "M 1,1 L 19,1 L 19,19 L 1,19 Z");
         }
     }
 }

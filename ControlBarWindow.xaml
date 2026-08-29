@@ -76,7 +76,9 @@
                     Style="{StaticResource ControlButtonStyle}"
                     ToolTip="Webページ操作を有効化">
                 <Viewbox Width="18" Height="18">
-                    <Path Data="M 6,3 L 6,19 L 11,14 L 15,21 L 18,19 L 14,12 L 20,10 Z"
+                    <!-- geometry は原点起点・描画実寸（bbox+ストローク）を Path のサイズに明示し、Viewbox が正しく中央配置する -->
+                    <Path Data="M 0.75,0.75 L 0.75,16.75 L 5.75,11.75 L 9.75,18.75 L 12.75,16.75 L 8.75,9.75 L 14.75,7.75 Z"
+                          Width="15.5" Height="19.5"
                           Stroke="#444444" StrokeThickness="1.5"
                           Fill="Transparent"/>
                 </Viewbox>
@@ -86,8 +88,10 @@
             <Button x:Name="BtnMenu"
                     Style="{StaticResource ControlButtonStyle}"
                     ToolTip="設定">
-                <Viewbox Width="18" Height="18">
-                    <Path Data="M 0,4 L 18,4 M 0,9 L 18,9 M 0,16 L 18,16"
+                <!-- 設定は他のアイコンよりやや大きく（20）。3本の間隔を等間隔に -->
+                <Viewbox Width="20" Height="20">
+                    <Path Data="M 1,1 L 19,1 M 1,7.5 L 19,7.5 M 1,14 L 19,14"
+                          Width="20" Height="15"
                           Stroke="#444444" StrokeThickness="2"/>
                 </Viewbox>
             </Button>
@@ -96,10 +100,14 @@
             <Button x:Name="BtnMinimize"
                     Style="{StaticResource ControlButtonStyle}"
                     ToolTip="最小化">
-                <Viewbox Width="18" Height="18">
-                    <Path Data="M 4,16 L 24,16"
-                          Stroke="#444444" StrokeThickness="2"/>
-                </Viewbox>
+                <!-- 下線は下端から8pxの下配置（中央配置にしない） -->
+                <Grid Width="46" Height="32">
+                    <Path Data="M 1,1 L 21,1"
+                          Width="22" Height="2"
+                          Stroke="#444444" StrokeThickness="2"
+                          HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                          Margin="0,0,0,8"/>
+                </Grid>
             </Button>
 
             <!-- 最大化/元に戻すボタン -->
@@ -108,7 +116,8 @@
                     ToolTip="最大化 / 元に戻す">
                 <Viewbox Width="18" Height="18">
                     <Path x:Name="IconMaximize"
-                          Data="M 5,5 L 23,5 L 23,23 L 5,23 Z"
+                          Data="M 1,1 L 19,1 L 19,19 L 1,19 Z"
+                          Width="20" Height="20"
                           Stroke="#444444" StrokeThickness="2"
                           Fill="Transparent"/>
                 </Viewbox>
@@ -119,7 +128,8 @@
                     Style="{StaticResource CloseButtonStyle}"
                     ToolTip="閉じる">
                 <Viewbox Width="18" Height="18">
-                    <Path Data="M 8,8 L 20,20 M 20,8 L 8,20"
+                    <Path Data="M 1,1 L 13,13 M 13,1 L 1,13"
+                          Width="14" Height="14"
                           Stroke="#444444" StrokeThickness="2"/>
                 </Viewbox>
             </Button>
