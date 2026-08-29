@@ -1,4 +1,10 @@
-using System;
+﻿using System;
+using System.CodeDom.Compiler;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -7,1481 +13,1718 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using System.Windows.Threading;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 
-namespace DGXSparkUtilWidget
+namespace DGXSparkUtilWidget;
+
+public partial class MainWindow : Window, IComponentConnector
 {
-    /// <summary>
-    /// メインウィンドウ。フレームレス・角丸のWidgetとして
-    /// DGX Spark Utility の Web UI を WebView2 で表示する。
-    /// </summary>
-    public partial class MainWindow : Window
-    {
-        private static readonly string SettingsDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "DGXSparkUtilWidget");
-
-        private static readonly string SettingsPath =
-            Path.Combine(SettingsDirectory, "settings.json");
-
-        private string _currentUrl = string.Empty;
-        private bool _isMaximized;
-        private Rect _normalBounds;
-        private DispatcherTimer? _hideTimer;
-        private DispatcherTimer? _hoverWatchdog;
-
-        // 独立した Topmost ウィンドウとして WebView2 のネイティブHWND 上に表示するため、
-        // コントロールバー・入力遮断オーバーレイ・復帰ボタンはすべて別ウィンドウで実装する。
-        private ControlBarWindow _controlBar = null!;
-        private Window _overlay = null!;
-        private bool _isDragging;
-        private Point _dragStartScreenMouse;
-        private Point _dragStartPos;
-
-        // リサイズ（エッジドラッグ）状態
-        private const double ResizeBand = 8;      // エッジのリサイズ帯幅（DIP）
-        private const double ResizeMinWidth = 400;   // リサイズ時の最小幅
-        private const double ResizeMinHeight = 300;  // リサイズ時の最小高さ
-        private bool _isResizing;
-        private int _resizeEdge;                  // ResizeEdge ビットマスク
-        private Point _resizeStartScreenMouse;
-        private Rect _resizeStartBounds;          // ドラッグ開始時の Left/Top/Width/Height
-
-        [Flags]
-        private enum ResizeEdge { None = 0, Left = 1, Right = 2, Top = 4, Bottom = 8 }
-
-        // Webモード用リサイズ帯ウィンドウ（上/下/左/右）。Webモードではフルオーバーレイを非表示にし、
-        // 外側 ResizeBand px の帯だけを表示してリサイズを受け取る（中心は WebView2 に直接届く）。
-        private Window[] _resizeBands = null!;
-
-        public MainWindow()
-        {
-            InitializeComponent();
-
-            // 起動時は前回終了時の位置・サイズを復元する（オフスクリーンならプライマリモニター作業領域中央へフォールバック）
-            RestoreWindowPosition(LoadSettings());
-
-            Closing += OnWindowClosing;
-
-            _normalBounds = new Rect(Left, Top, Width, Height);
-
-            _controlBar = CreateControlBarWindow();
-            _overlay = CreateOverlayWindow();
-            _resizeBands = CreateResizeBands();
-
-            // メインウィンドウの WM_NCHITTEST をフック。ウィンドウモードでは HTTRANSPARENT を返し、
-            // WebView2 のネイティブ子HWND（Chrome_WidgetWin_* 等、別プロセスのウィンドウ）を含めて
-            // メインウィンドウ全体を OS レベルでクリックスルーにする。
-            // HwndSource はウィンドウハンドル生成後（SourceInitialized）で取得する。
-            SourceInitialized += OnSourceInitialized;
-
-            LocationChanged += (s, e) => UpdateFloatingWindows();
-            SizeChanged += (s, e) => UpdateFloatingWindows();
-            // メインウィンドウが再アクティベートされると topmost 帯内で最前面に来るため、
-            // ウィンドウモードではオーバーレイを Z-order 直下に再固定し、コントロールバーを最前面に引き上げる。
-            Activated += (s, e) =>
-            {
-                if (!_isWebMode)
-                {
-                    if (_overlay.Visibility == Visibility.Visible)
-                    {
-                        PinOverlayBelowMain();
-                    }
-                    if (_controlBar.Visibility == Visibility.Visible)
-                    {
-                        BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
-                    }
-                }
-            };
-            StateChanged += (s, e) =>
-            {
-                if (WindowState == WindowState.Minimized)
-                {
-                    _overlay.Hide();
-                    foreach (var b in _resizeBands) b.Hide();
-                    _controlBar.Hide();
-                    _webModeButtonWindow?.Hide();
-                }
-                else if (_isWebMode)
-                {
-                    // 最小化復帰時: リサイズ帯と復帰ボタンを再表示・再配置する
-                    ShowResizeBands();
-                    ShowWebModeButtonWindow();
-                }
-                else
-                {
-                    ShowOverlay();
-                }
-            };
-        }
-
-        /// <summary>
-        /// HwndSource が生成された直後に WM_NCHITTEST フックを設置する。
-        /// （SourceInitialized は WPF の標準的なハンドルの取得タイミング）
-        /// </summary>
-        private void OnSourceInitialized(object? sender, EventArgs e)
-        {
-            _mainHwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
-            LogDebug($"SourceInitialized: HwndSource=({_mainHwndSource != null}), MainHwnd=0x{new WindowInteropHelper(this).Handle.ToInt64():X}");
-            _mainHwndSource?.AddHook(OnMainWindowHook);
-        }
-
-        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
-        {
-            // 初期状態：ウィンドウモード（Web操作無効）。
-            // WebView2 初期化が完了する前に入力遮断オーバーレイを表示し、
-            // 起動直後にマウス入力が Web 側へ届くのを防ぐ。
-            SetWebMode(false);
-            StartHoverWatchdog();
-
-            try
-            {
-                await WebView.EnsureCoreWebView2Async();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    $"WebView2 の初期化に失敗しました。\nWebView2 Runtime を確認してください。\n\n詳細: {ex.Message}",
-                    "初期化エラー", MessageBoxButton.OK, MessageBoxImage.Error);
-                Close();
-                return;
-            }
-
-            // 診断用: 各ナビゲーション完了時にネイティブウィンドウツリーを debug.log に出力する
-            WebView.CoreWebView2.NavigationCompleted += (s, e) => LogWindowTree();
-
-            AppSettings? settings = LoadSettings();
-            LogDebug($"起動: 設定読込={settings is not null}, Url={settings?.Url}, Opacity={settings?.Opacity}");
-
-            if (settings is not null && !string.IsNullOrWhiteSpace(settings.Url))
-            {
-                _currentUrl = settings.Url;
-                ApplyOpacity(settings.Opacity);
-                NavigateToUrl(settings.Url);
-            }
-            else
-            {
-                // 初回起動（設定値なし）: 設定ダイアログで URL 入力を促す
-                // （入力遮断オーバーレイは一時的に非表示にしてダイアログを操作可能にする）
-                _overlay.Hide();
-                try
-                {
-                    var dialog = new SettingsDialog(string.Empty, 1.0) { Owner = this };
-                    if (dialog.ShowDialog() == true)
-                    {
-                        SaveSettings(dialog.Url!, dialog.OpacityValue);
-                        _currentUrl = dialog.Url!;
-                        ApplyOpacity(dialog.OpacityValue);
-                        NavigateToUrl(dialog.Url!);
-                    }
-                    else
-                    {
-                        // キャンセルされた場合: 案内ページを表示
-                        WebView.CoreWebView2?.NavigateToString(PlaceholderHtml);
-                    }
-                }
-                finally
-                {
-                    if (!_isWebMode) ShowOverlay();
-                }
-            }
-        }
-
-        private void RootBorder_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-        {
-            if (e.ButtonState != MouseButtonState.Pressed) return;
-            if (e.OriginalSource is UIElement source)
-            {
-                DependencyObject? node = source;
-                while (node != null)
-                {
-                    if (node is Button or TextBox or Slider) return;
-                    node = VisualTreeHelper.GetParent(node);
-                }
-            }
-            ShowControlBar();
-            try { DragMove(); }
-            catch (InvalidOperationException) { }
-        }
-
-        private void RootBorder_MouseEnter(object sender, MouseEventArgs e)
-        {
-            ShowControlBar();
-        }
-
-        private void RootBorder_MouseLeave(object sender, MouseEventArgs e)
-        {
-            HideControlBar();
-        }
-
-        /// <summary>フローティングコントロールバー（独立ウィンドウ）を表示する。ホバー時のレベルトリガーとして頻繁に呼ばれるため冪等である。</summary>
-        private void ShowControlBar()
-        {
-            _hideTimer?.Stop();
-            if (_controlBar.Visibility != Visibility.Visible)
-            {
-                LogDebug($"ShowControlBar: hidden bar -> show (opacity={_controlBar.Opacity:F2})");
-                _controlBar.Show();
-                PositionControlBar();
-            }
-            // 常に最前面へ再固定する。ドラッグ中に HWND がオーバーレイの下に沈むことがあるため、
-            // 表示遷移時のみでは不十分（SetWindowPos(HWND_TOP) は低コスト）。
-            BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
-            if (_controlBar.Opacity < 0.5)
-            {
-                // 現在の opacity から開始することで、MouseMove からの繰り返し呼び出しでフェードがリセットされない
-                var anim = new DoubleAnimation(_controlBar.Opacity, 1.0, new Duration(TimeSpan.FromMilliseconds(250)))
-                { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
-                _controlBar.BeginAnimation(OpacityProperty, anim);
-            }
-        }
-
-        /// <summary>フローティングコントロールバーを隠す（ディレイ付き）。完全にフェードアウトしたらウィンドウ自体も非表示にする。</summary>
-        private void HideControlBar()
-        {
-            // リサイズ中はエッジ（右上隅付近）からドラッグするため、バーが自動非表示にならないよう無視する
-            if (_isResizing) return;
-            _hideTimer?.Stop();
-            _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-            _hideTimer.Tick += (s, e) =>
-            {
-                _hideTimer.Stop();
-                if (_controlBar.Opacity > 0.5)
-                {
-                    var anim = new DoubleAnimation(_controlBar.Opacity, 0.0, new Duration(TimeSpan.FromMilliseconds(350)))
-                    { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } };
-                    anim.Completed += (_, __) =>
-                    {
-                        if (_controlBar.Opacity < 0.5)
-                        {
-                            LogDebug("control bar -> Hide() (fade-out complete)");
-                            _controlBar.Hide();
-                        }
-                    };
-                    _controlBar.BeginAnimation(OpacityProperty, anim);
-                }
-            };
-            _hideTimer.Start();
-        }
-
-        // ====================== ホバー watchdog（WPF ホバー追跡 stuck 対策）======================
-
-        /// <summary>
-        /// ドラッグ終了後の nudge リシンクは SetCursorPos（瞬間移動）でカーソルを外→内へ動かすが、
-        /// WM_MOUSELEAVE は物理的なマウス移動でのみ発生するため、WPF のホバー状態が「外にいる」
-        /// と誤認したまま固定され、以降の MouseEnter/MouseMove が発火しなくなるケースがある。
-        /// 250ms 間隔でカーソルの実位置をポーリングしてバーの表示/非表示を補正する（ウィンドウモードのみ）。
-        /// </summary>
-        private void StartHoverWatchdog()
-        {
-            if (_hoverWatchdog is not null) return;
-            _hoverWatchdog = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            _hoverWatchdog.Tick += (_, _) => HoverWatchdogTick();
-            _hoverWatchdog.Start();
-        }
-
-        private void StopHoverWatchdog()
-        {
-            _hoverWatchdog?.Stop();
-        }
-
-        private void HoverWatchdogTick()
-        {
-            if (_isWebMode || double.IsNaN(Left)) return;
-            GetCursorPos(out POINT p);
-            var src = (HwndSource?)PresentationSource.FromVisual(this);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            double mx = p.X / sx, my = p.Y / sy;
-            bool inside = mx >= Left && mx <= Left + Width && my >= Top && my <= Top + Height;
-            if (inside)
-            {
-                if (_controlBar.Visibility != Visibility.Visible) LogDebug("hover watchdog: cursor inside but bar hidden -> show");
-                ShowControlBar();
-            }
-            else
-            {
-                HideControlBar();
-            }
-        }
-
-        private void BtnMinimize_Click(object sender, RoutedEventArgs e)
-        {
-            WindowState = WindowState.Minimized;
-        }
-
-        private void BtnMaximizeRestore_Click(object sender, RoutedEventArgs e)
-        {
-            if (!_isMaximized)
-            {
-                _normalBounds = new Rect(Left, Top, Width, Height);
-                var workArea = SystemParameters.WorkArea;
-                Left = workArea.Left;
-                Top = workArea.Top;
-                Width = workArea.Width;
-                Height = workArea.Height;
-                _isMaximized = true;
-                _controlBar.SetMaximizeIcon(true);
-            }
-            else
-            {
-                Left = _normalBounds.Left;
-                Top = _normalBounds.Top;
-                Width = _normalBounds.Width;
-                Height = _normalBounds.Height;
-                _isMaximized = false;
-                _controlBar.SetMaximizeIcon(false);
-            }
-        }
-
-        private void BtnClose_Click(object sender, RoutedEventArgs e)
-        {
-            Application.Current.Shutdown();
-        }
-
-        private void BtnMenu_Click(object sender, RoutedEventArgs e)
-        {
-            // 入力遮断オーバーレイを一時的に非表示にしてダイアログを操作可能にする
-            _overlay.Hide();
-            try
-            {
-                var dialog = new SettingsDialog(_currentUrl, Opacity) { Owner = this };
-                if (dialog.ShowDialog() == true)
-                {
-                    SaveSettings(dialog.Url!, dialog.OpacityValue);
-                    _currentUrl = dialog.Url!;
-                    ApplyOpacity(dialog.OpacityValue);
-                    NavigateToUrl(dialog.Url!);
-                }
-            }
-            finally
-            {
-                if (!_isWebMode) ShowOverlay();
-            }
-        }
-
-        private bool _isWebMode;
-        private bool _wasWebMode;
-
-        // WM_NCHITTEST フック（ウィンドウモードでメインウィンドウ全体を HTTRANSPARENT にする）
-        private HwndSource? _mainHwndSource;
-        private int _hitTestLogCount;
-
-        private const int WM_NCHITTEST = 0x0084;
-        private const int HTCLIENT = 1;
-        private const int HTTRANSPARENT = -1;
-
-        private void BtnWebToggle_Click(object sender, RoutedEventArgs e)
-        {
-            SetWebMode(true);
-        }
-
-        /// <summary>
-        /// Web操作モード / ウィンドウ操作モードを切り替える。
-        /// Webモード: WebView2 のネイティブHWND がマウス操作を受け取る。復帰ボタン（ミニウィンドウ）を常時表示。
-        /// ウィンドウモード: ネイティブHWND の入力を透過化してマウス操作を遮断し、ウィンドウドラッグ等が可能。
-        /// </summary>
-        private void SetWebMode(bool webMode)
-        {
-            _isWebMode = webMode;
-
-            if (webMode)
-            {
-                // Web操作モード: WebView2 が直接入力を受け取る。復帰ボタン（独立ミニウィンドウ）を表示。
-                // フルオーバーレイは非表示にし、外側8pxのリサイズ帯ウィンドウ4本だけを表示して
-                // エッジドラッグリサイズを可能にする（中心のクリックは WebView2 に直接届く）。
-                _overlay.Hide();
-                ShowResizeBands();
-                _hideTimer?.Stop();
-                StopHoverWatchdog();
-                _controlBar.Hide();
-                ShowWebModeButtonWindow();
-                SetMainHitTestTransparent(false); // メインウィンドウをヒットテスト可能に（Web が操作可能に）
-                PinWebModeButtonAboveMain(); // 初期状態から「ボタン > リサイズ帯 > メイン」を保証する
-            }
-            else
-            {
-                // ウィンドウ操作モード: オーバーレイを表示しマウス入力をすべてキャプチャ（Webページは操作不可）。
-                // 復帰ボタン・リサイズ帯を非表示。コントロールバーはホバー時に表示される（オーバーレイの MouseEnter）。
-                ShowOverlay();
-                foreach (var b in _resizeBands) b.Hide();
-                HideWebModeButtonWindow();
-                StopWebModePinTimer();
-                StartHoverWatchdog();
-                // Webモードから戻った直後は、操作した場所の近く（右上）にコントロールバーを即表示する
-                if (_wasWebMode) ShowControlBar();
-                SetMainHitTestTransparent(true); // メインウィンドウを OS レベルでヒットテスト不能に（Web 入力を遮断）
-            }
-            _wasWebMode = webMode;
-        }
-
-        // ====================== 入力遮断オーバーレイ / 浮遊コントロールバー ======================
-
-        /// <summary>
-        /// 入力遮断オーバーレイを生成する。ウィンドウモードで WebView2 のネイティブHWND より手前に
-        /// 独立した Topmost ウィンドウとして表示し、マウス入力をすべてキャプチャして Web ページの
-        /// 操作を無効化する。見た目は完全に透明。
-        /// WS_EX_NOACTIVATE を付与し、クリックしてもアクティベーションを奪わない（浮遊コントロールバーが
-        /// 最前面のまま維持される）。
-        /// </summary>
-        private Window CreateOverlayWindow()
-        {
-            // WPF のAllowsTransparencyウィンドウで alpha=0（Brushes.Transparent）だと、
-            // レイヤーウィンドウのヒットテストで全ピクセルが HTTRANSPARENT 扱いになり
-            // マウスイベントが受信できない。alpha=1（事実上透明）にすることで
-            // OS へのヒットテストは HTCLIENT になり、マウス入力を受信できる。
-            var hitTestBrush = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-            var overlay = new Window
-            {
-                WindowStyle = WindowStyle.None,
-                AllowsTransparency = true,
-                Background = hitTestBrush,
-                Topmost = true,
-                ShowInTaskbar = false,
-                ResizeMode = ResizeMode.NoResize,
-            };
-            // 全領域を alpha=1 の Border で覆い、WPF のヒットテストを確実に行わせる
-            overlay.Content = new Border { Background = hitTestBrush };
-            overlay.Loaded += (s, e) =>
-            {
-                IntPtr h = new WindowInteropHelper(overlay).Handle;
-                int ex = GetWindowLong(h, GWL_EXSTYLE);
-                SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
-            };
-            overlay.MouseDown += Overlay_MouseDown;
-            overlay.MouseMove += Overlay_MouseMove;
-            overlay.MouseUp += Overlay_MouseUp;
-            overlay.MouseEnter += (s, e) =>
-            {
-                LogDebug("overlay MouseEnter -> ShowControlBar");
-                ShowControlBar();
-            };
-            overlay.MouseLeave += (s, e) =>
-            {
-                LogDebug("overlay MouseLeave -> HideControlBar");
-                HideControlBar();
-            };
-            return overlay;
-        }
-
-        /// <summary>浮遊コントロールバー（独立ウィンドウ）を生成し、ボタンのイベントを接続する。</summary>
-        private ControlBarWindow CreateControlBarWindow()
-        {
-            var bar = new ControlBarWindow();
-            bar.Loaded += (s, e) =>
-            {
-                // アクティベーションを奪わない（メインウィンドウのキーボードフォーカスを維持するため）
-                IntPtr h = new WindowInteropHelper(bar).EnsureHandle();
-                int ex = GetWindowLong(h, GWL_EXSTYLE);
-                SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
-            };
-            bar.BtnMinimize.Click += BtnMinimize_Click;
-            bar.BtnMaximizeRestore.Click += BtnMaximizeRestore_Click;
-            bar.BtnClose.Click += BtnClose_Click;
-            bar.BtnMenu.Click += BtnMenu_Click;
-            bar.BtnWebToggle.Click += BtnWebToggle_Click;
-            bar.MouseEnter += (s, e) => { LogDebug("control bar MouseEnter"); _hideTimer?.Stop(); };
-            bar.MouseLeave += (s, e) => { LogDebug("control bar MouseLeave -> HideControlBar"); HideControlBar(); };
-            return bar;
-        }
-
-        private void Overlay_MouseDown(object sender, MouseButtonEventArgs e)
-        {
-            if (e.ChangedButton != MouseButton.Left || e.ButtonState != MouseButtonState.Pressed) return;
-            GetCursorPos(out POINT p);
-            var pos = new Point(p.X, p.Y);
-
-            // エッジ帯内ならリサイズドラッグ、それ以外なら移動ドラッグ
-            var edge = GetResizeEdge(e.GetPosition(_overlay));
-            if (edge != ResizeEdge.None)
-            {
-                _isResizing = true;
-                _resizeEdge = (int)edge;
-                _resizeStartScreenMouse = pos;
-                _resizeStartBounds = new Rect(Left, Top, Width, Height);
-                // 最大化状態からのリサイズはまず通常サイズへ復元してから開始する
-                if (_isMaximized)
-                {
-                    Left = _normalBounds.Left;
-                    Top = _normalBounds.Top;
-                    Width = _normalBounds.Width;
-                    Height = _normalBounds.Height;
-                    _resizeStartBounds = new Rect(Left, Top, Width, Height);
-                    _isMaximized = false;
-                    _controlBar.SetMaximizeIcon(false);
-                }
-                LogDebug($"overlay MouseDown (resize start) edge={edge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
-            }
-            else
-            {
-                _isDragging = true;
-                _dragStartScreenMouse = pos;
-                _dragStartPos = new Point(Left, Top);
-                LogDebug($"overlay MouseDown (drag start) main=({Left},{Top})");
-            }
-            _overlay.CaptureMouse();
-        }
-
-        private void Overlay_MouseMove(object sender, MouseEventArgs e)
-        {
-            if (_isResizing)
-            {
-                var d = GetResizeDeltaDip();
-                ApplyResize(d.dx, d.dy);
-                return;
-            }
-            if (!_isDragging)
-            {
-                // エッジ帯の上ならリサイズカーソル（縦/横/コーナー）を表示する
-                _overlay.Cursor = GetResizeCursor(GetResizeEdge(e.GetPosition(_overlay)));
-                // レベルトリガー: カーソルがウィンドウ内で動いている限りバーを表示する。
-                // ドラッグ終了後に WPF の enter/leave 追跡が停止しても（エッジイベントが発火しなくても）
-                // カーソルの移動だけでバーが再表示・再固定される。
-                if (!_isWebMode) ShowControlBar();
-                return;
-            }
-            GetCursorPos(out POINT cur);
-            var src = (HwndSource)PresentationSource.FromVisual(this);
-            double scaleX = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double scaleY = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            Left = _dragStartPos.X + (cur.X - _dragStartScreenMouse.X) / scaleX;
-            Top = _dragStartPos.Y + (cur.Y - _dragStartScreenMouse.Y) / scaleY;
-            // オーバーレイとコントロールバーをメインウィンドウに追従させる
-            _overlay.Left = Left;
-            _overlay.Top = Top;
-            PositionControlBar();
-            PositionWebModeButtonWindow();
-        }
-
-        private void Overlay_MouseUp(object sender, MouseButtonEventArgs e)
-        {
-            if (_isResizing)
-            {
-                LogDebug($"overlay MouseUp (resize end) bounds=({Left},{Top},{Width:F0}x{Height:F0})");
-            }
-            _isDragging = false;
-            _isResizing = false;
-            _resizeEdge = 0;
-            _overlay.ReleaseMouseCapture();
-            // ドラッグ（移動/リサイズ）終了後に WPF のホバー追跡（enter/leave）が停止して、
-            // 次回入場時に MouseEnter/MouseMove が発火しないことがある。原因は、ドラッグ中に
-            // カーソルがオーバーレイ以外のウィンドウ上を通過すると WM_MOUSEMOVE が届かず、
-            // WPF のホバー状態が実カーソル位置と乖離するため。カーソルを一瞬外へ出して再入場させ、
-            // 確実な enter/leave を発生させてホバー状態をリシンクする（1フレーム内の往復で視覚影響は最小）。
-            GetCursorPos(out POINT up);
-            var src = (HwndSource)PresentationSource.FromVisual(_overlay);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            double mx = up.X / sx, my = up.Y / sy;
-            bool inside = (mx >= Left && mx <= Left + Width && my >= Top && my <= Top + Height);
-            if (inside)
-            {
-                // 内側で終了: 近接エッジの外へ一瞬出す（16px）
-                double dTop = my - Top, dBottom = Top + Height - my;
-                double dLeft = mx - Left, dRight = Left + Width - mx;
-                double minD = Math.Min(Math.Min(dTop, dBottom), Math.Min(dLeft, dRight));
-                int outX = up.X, outY = up.Y;
-                if (minD == dTop) outY = (int)Math.Round(Top - 16 * sy);
-                else if (minD == dBottom) outY = (int)Math.Round(Top + Height + 16 * sy);
-                else if (minD == dLeft) outX = (int)Math.Round(Left - 16 * sx);
-                else outX = (int)Math.Round(Left + Width + 16 * sx);
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    SetCursorPos(outX, outY);
-                    SetCursorPos(up.X, up.Y);
-                }), System.Windows.Threading.DispatcherPriority.Input);
-            }
-            else
-            {
-                // 外側で終了: 内側へ一瞬戻す（角から24px内側）
-                int insideX, insideY;
-                if (my < Top) { insideX = (int)Math.Round(Left + 24 * sx); insideY = (int)Math.Round(Top + 24 * sy); }
-                else if (my > Top + Height) { insideX = (int)Math.Round(Left + 24 * sx); insideY = (int)Math.Round(Top + Height - 24 * sy); }
-                else if (mx < Left) { insideX = (int)Math.Round(Left + 24 * sx); insideY = up.Y; }
-                else { insideX = (int)Math.Round(Left + Width - 24 * sx); insideY = up.Y; }
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    SetCursorPos(insideX, insideY);
-                    SetCursorPos(up.X, up.Y);
-                }), System.Windows.Threading.DispatcherPriority.Input);
-            }
-        }
-
-        /// <summary>ウィンドウ内座標（DIP）からリサイズエッジを判定する。帯幅は ResizeBand。</summary>
-        private ResizeEdge GetResizeEdge(Point p)
-        {
-            var edge = ResizeEdge.None;
-            if (p.X <= ResizeBand) edge |= ResizeEdge.Left;
-            else if (p.X >= Width - ResizeBand) edge |= ResizeEdge.Right;
-            if (p.Y <= ResizeBand) edge |= ResizeEdge.Top;
-            else if (p.Y >= Height - ResizeBand) edge |= ResizeEdge.Bottom;
-            return edge;
-        }
-
-        /// <summary>リサイズエッジに対応するカーソルを返す（コーナーは斜め両方向）。</summary>
-        private static Cursor GetResizeCursor(ResizeEdge edge)
-        {
-            bool l = (edge & ResizeEdge.Left) != 0, r = (edge & ResizeEdge.Right) != 0;
-            bool t = (edge & ResizeEdge.Top) != 0, b = (edge & ResizeEdge.Bottom) != 0;
-            if ((l && t) || (r && b)) return Cursors.SizeNWSE;
-            if ((r && t) || (l && b)) return Cursors.SizeNESW;
-            if (l || r) return Cursors.SizeWE;
-            if (t || b) return Cursors.SizeNS;
-            return Cursors.Arrow;
-        }
-
-        /// <summary>リサイズドラッグ中、カーソルの画面移動量（DIP）からメインウィンドウの Left/Top/Width/Height を更新する。</summary>
-        private void ApplyResize(double dx, double dy)
-        {
-            double left = _resizeStartBounds.Left, top = _resizeStartBounds.Top;
-            double width = _resizeStartBounds.Width, height = _resizeStartBounds.Height;
-            if ((_resizeEdge & (int)ResizeEdge.Left) != 0)
-            {
-                width = Math.Max(ResizeMinWidth, _resizeStartBounds.Width - dx);
-                left = _resizeStartBounds.Right - width;
-            }
-            if ((_resizeEdge & (int)ResizeEdge.Right) != 0)
-            {
-                width = Math.Max(ResizeMinWidth, _resizeStartBounds.Width + dx);
-            }
-            if ((_resizeEdge & (int)ResizeEdge.Top) != 0)
-            {
-                height = Math.Max(ResizeMinHeight, _resizeStartBounds.Height - dy);
-                top = _resizeStartBounds.Bottom - height;
-            }
-            if ((_resizeEdge & (int)ResizeEdge.Bottom) != 0)
-            {
-                height = Math.Max(ResizeMinHeight, _resizeStartBounds.Height + dy);
-            }
-
-            Left = left;
-            Top = top;
-            Width = width;
-            Height = height;
-            // Webモードではリサイズ帯ウィンドウ4本を新しい矩形に同期する
-            // （ウィンドウモードでは SizeChanged -> UpdateFloatingWindows が追従する）
-            if (_isWebMode)
-            {
-                PositionResizeBands();
-                PositionWebModeButtonWindow();
-            }
-        }
-
-        /// <summary>
-        /// ドラッグ開始点からのカーソル画面移動量（DIP）を返す。
-        /// ウィンドウ/帯の座標基準にすると、左・上エッジドラッグでウィンドウ自体が動くため
-        /// delta が半分になってしまうので、必ず画面座標基準を使う。
-        /// </summary>
-        private (double dx, double dy) GetResizeDeltaDip()
-        {
-            GetCursorPos(out POINT cur);
-            var src = (HwndSource)PresentationSource.FromVisual(this);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            return ((cur.X - _resizeStartScreenMouse.X) / sx, (cur.Y - _resizeStartScreenMouse.Y) / sy);
-        }
-
-        private void ShowOverlay()
-        {
-            _overlay.Show();
-            PinOverlayBelowMain();
-            UpdateFloatingWindows();
-            // キーボード入力をメインウィンドウに向かい、Web ページへキーが送られないようにする
-            SetFocus(new WindowInteropHelper(this).Handle);
-            LogOverlayZOrder();
-        }
-
-        /// <summary>オーバーレイとメインウィンドウの HWND・拡張スタイル・矩形・トップレベル Z-order を診断ログに出力する。</summary>
-        private void LogOverlayZOrder()
-        {
-            try
-            {
-                IntPtr oh = new WindowInteropHelper(_overlay).EnsureHandle();
-                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
-                if (oh == IntPtr.Zero || mh == IntPtr.Zero)
-                {
-                    LogDebug($"Z-order: overlayHwnd={oh} mainHwnd={mh} (null が存在)");
-                    return;
-                }
-                RECT or, mr;
-                GetWindowRect(oh, out or);
-                GetWindowRect(mh, out mr);
-                LogDebug($"Z-order: overlay=0x{oh.ToInt64():X} ex=0x{GetWindowLong(oh, GWL_EXSTYLE):X} rect=({or.Left},{or.Top})-({or.Right},{or.Bottom}) visible={_overlay.Visibility}");
-                LogDebug($"Z-order: main=0x{mh.ToInt64():X} ex=0x{GetWindowLong(mh, GWL_EXSTYLE):X} rect=({mr.Left},{mr.Top})-({mr.Right},{mr.Bottom})");
-                IntPtr h = GetTopWindow(IntPtr.Zero);
-                int i = 0;
-                while (h != IntPtr.Zero && i < 50)
-                {
-                    if (h == mh)
-                    {
-                        LogDebug($"Z-order: main は top-level #{i}");
-                        break;
-                    }
-                    if (h == oh)
-                    {
-                        LogDebug($"Z-order: overlay は top-level #{i}");
-                    }
-                    h = GetWindow(h, GW_HWNDNEXT);
-                    i++;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogDebug("Z-order 診断失敗: " + ex.Message);
-            }
-        }
-
-        /// <summary>
-        /// Webモード用リサイズ帯ウィンドウ4本（上/下/左/右）を生成する。
-        /// 幅または高さが ResizeBand px の薄い Topmost ウィンドウで、見た目は完全に透明。
-        /// Webモードではこれらだけがマウス入力を受け取り、中心は WebView2 に直接届く。
-        /// </summary>
-        private Window[] CreateResizeBands()
-        {
-            var hitTestBrush = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-            ResizeEdge[] edges = { ResizeEdge.Top, ResizeEdge.Bottom, ResizeEdge.Left, ResizeEdge.Right };
-            var bands = new Window[4];
-            for (int i = 0; i < 4; i++)
-            {
-                ResizeEdge edge = edges[i];
-                var band = new Window
-                {
-                    WindowStyle = WindowStyle.None,
-                    AllowsTransparency = true,
-                    Background = hitTestBrush,
-                    Content = new Border { Background = hitTestBrush },
-                    Topmost = true,
-                    ShowInTaskbar = false,
-                    ResizeMode = ResizeMode.NoResize,
-                    Cursor = (edge == ResizeEdge.Left || edge == ResizeEdge.Right) ? Cursors.SizeWE : Cursors.SizeNS,
-                };
-                Window captured = band; // クロージャで対象ウィンドウを保持（キャプチャ中は sender が変わっても安全）
-                band.Loaded += (s, e) =>
-                {
-                    IntPtr h = new WindowInteropHelper(band).EnsureHandle();
-                    int ex = GetWindowLong(h, GWL_EXSTYLE);
-                    SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
-                };
-                band.MouseDown += (s, e) => Band_MouseDown(captured, e);
-                band.MouseMove += (s, e) => { UpdateBandCursor(captured, edge); Band_MouseMove(); };
-                band.MouseUp += (s, e) => Band_MouseUp(captured, e);
-                bands[i] = band;
-            }
-            return bands;
-        }
-
-        /// <summary>リサイズ帯を表示し、復帰ボタンの直下（= メインの直上）に Z-order 固定する。</summary>
-        private void ShowResizeBands()
-        {
-            // 必ず Show() より前に矩形を設定する。WPF は Show() 時点のサイズでウィンドウを生成するため、
-            // 未設定（0x0）のまま表示するとヒットテスト対象にならずリサイズ不能になる。
-            PositionResizeBands();
-            foreach (var b in _resizeBands)
-            {
-                if (!b.IsVisible) b.Show();
-            }
-            IntPtr bh = _webModeButtonWindow is not null
-                ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle()
-                : new WindowInteropHelper(this).EnsureHandle();
-            foreach (var b in _resizeBands)
-            {
-                SetWindowPos(new WindowInteropHelper(b).EnsureHandle(), bh,
-                    0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-            LogResizeBands();
-        }
-
-        /// <summary>リサイズ帯の HWND・矩形を診断ログに出力する。</summary>
-        private void LogResizeBands()
-        {
-            try
-            {
-                string[] names = { "top", "bottom", "left", "right" };
-                for (int i = 0; i < _resizeBands.Length; i++)
-                {
-                    var b = _resizeBands[i];
-                    IntPtr h = new WindowInteropHelper(b).EnsureHandle();
-                    RECT r;
-                    GetWindowRect(h, out r);
-                    LogDebug($"[band] {names[i]}=0x{h.ToInt64():X} visible={b.IsVisible} rect=({r.Left},{r.Top})-({r.Right},{r.Bottom})");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogDebug("[band] 診断失敗: " + ex.Message);
-            }
-        }
-
-        /// <summary>リサイズ帯4本をメインウィンドウの各辺に沿って配置する（Webモード時のみ有効）。</summary>
-        private void PositionResizeBands()
-        {
-            if (!_isWebMode) return;
-            double w = Width, h = Height;
-            _resizeBands[0].Width = w; _resizeBands[0].Height = ResizeBand; _resizeBands[0].Left = Left; _resizeBands[0].Top = Top;                     // 上
-            _resizeBands[1].Width = w; _resizeBands[1].Height = ResizeBand; _resizeBands[1].Left = Left; _resizeBands[1].Top = Top + h - ResizeBand;    // 下
-            _resizeBands[2].Width = ResizeBand; _resizeBands[2].Height = h; _resizeBands[2].Left = Left; _resizeBands[2].Top = Top;                     // 左
-            _resizeBands[3].Width = ResizeBand; _resizeBands[3].Height = h; _resizeBands[3].Left = Left + w - ResizeBand; _resizeBands[3].Top = Top;    // 右
-        }
-
-        /// <summary>帯からのリサイズドラッグ開始。エッジはメインウィンドウに対するカーソル位置で判定する（コーナーで幅・高の両次元に対応）。</summary>
-        private void Band_MouseDown(Window band, MouseButtonEventArgs e)
-        {
-            if (e.ChangedButton != MouseButton.Left || e.ButtonState != MouseButtonState.Pressed) return;
-            GetCursorPos(out POINT p);
-            var src = (HwndSource)PresentationSource.FromVisual(this);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            var edge = GetResizeEdge(new Point(p.X / sx - Left, p.Y / sy - Top));
-            _isResizing = true;
-            _resizeEdge = (int)edge;
-            _resizeStartScreenMouse = new Point(p.X, p.Y);
-            _resizeStartBounds = new Rect(Left, Top, Width, Height);
-            // 最大化状態からのリサイズはまず通常サイズへ復元してから開始する
-            if (_isMaximized)
-            {
-                Left = _normalBounds.Left;
-                Top = _normalBounds.Top;
-                Width = _normalBounds.Width;
-                Height = _normalBounds.Height;
-                _resizeStartBounds = new Rect(Left, Top, Width, Height);
-                _isMaximized = false;
-                _controlBar.SetMaximizeIcon(false);
-            }
-            LogDebug($"band MouseDown (resize start) edge={edge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
-            band.CaptureMouse();
-        }
-
-        /// <summary>リサイズ帯の上でコーナー領域（角 16px）にいると斜めカーソルを表示する。</summary>
-        private void UpdateBandCursor(Window band, ResizeEdge captured)
-        {
-            if (_isResizing) return;
-            // Screen 座標でコーナー判定する
-            GetCursorPos(out POINT p);
-            var src = (HwndSource)PresentationSource.FromVisual(this);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            double mx = p.X / sx, my = p.Y / sy;
-            const double corner = 16;
-            bool l = (captured & ResizeEdge.Left) != 0, r = (captured & ResizeEdge.Right) != 0;
-            bool t = (captured & ResizeEdge.Top) != 0, b = (captured & ResizeEdge.Bottom) != 0;
-            bool atCorner = false;
-            if (l && t) atCorner = mx <= Left + corner && my <= Top + corner;
-            else if (r && t) atCorner = mx >= Left + Width - corner && my <= Top + corner;
-            else if (l && b) atCorner = mx <= Left + corner && my >= Top + Height - corner;
-            else if (r && b) atCorner = mx >= Left + Width - corner && my >= Top + Height - corner;
-            var cursor = atCorner ? ((l && t || r && b) ? Cursors.SizeNWSE : Cursors.SizeNESW)
-                                  : (l || r ? Cursors.SizeWE : Cursors.SizeNS);
-            band.Cursor = cursor;
-            if (band.Content is FrameworkElement fe) fe.Cursor = cursor; // 子要素の既定カーソルを上書き
-        }
-
-        private void Band_MouseMove()
-        {
-            if (!_isResizing) return;
-            var d = GetResizeDeltaDip();
-            ApplyResize(d.dx, d.dy);
-        }
-
-        private void Band_MouseUp(Window band, MouseButtonEventArgs e)
-        {
-            LogDebug($"band MouseUp (resize end) bounds=({Left},{Top},{Width:F0}x{Height:F0})");
-            _isResizing = false;
-            _resizeEdge = 0;
-            band.ReleaseMouseCapture();
-        }
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetCursorPos(out POINT pt);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetCursorPos(int X, int Y);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT { public int X; public int Y; }
-
-        [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetTopWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-
-        private const uint GW_HWNDNEXT = 2;
-        private static readonly IntPtr HWND_TOP = IntPtr.Zero;
-        private const uint SWP_NOMOVE = 0x0002;
-        private const uint SWP_NOSIZE = 0x0001;
-        private const uint SWP_NOACTIVATE = 0x0010;
-
-        /// <summary>ウィンドウをアクティベーション変化なしに最前面（topmost帯内で）に移動する。</summary>
-        private static void BringToFront(IntPtr hwnd)
-        {
-            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-
-        /// <summary>
-        /// メインウィンドウの HwndSource フック。ウィンドウモードでは WM_NCHITTEST に対し
-        /// HTTRANSPARENT を返すことで、OS がメインウィンドウ配下の WebView2 ネイティブHWND
-        /// （Chrome_WidgetWin_* 等、別プロセスのウィンドウのため下から制御不能）を含めて
-        /// 全体をクリックスルーとする。透過したマウス入力は Z-order 直下の入力遮断オーバーレイに届く。
-        /// Webモードではデフォルト処理（IntPtr.Zero）を返し、Webページが通常通り入力を受け取る。
-        /// </summary>
-        private IntPtr OnMainWindowHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-        {
-            if (msg != WM_NCHITTEST) return IntPtr.Zero;
-            if (_hitTestLogCount < 10)
-            {
-                _hitTestLogCount++;
-                LogDebug($"WM_NCHITTEST hwnd=0x{hwnd.ToInt64():X} hit={wParam.ToInt32()} webMode={_isWebMode} (#{_hitTestLogCount})");
-            }
-            // ウィンドウモード: クライアント領域のヒットコード（HTCLIENT 等）はすべて HTTRANSPARENT とし、
-            // メインウィンドウ配下の WebView2 ネイティブHWND 全体を入力透過にする。
-            // Webモード: デフォルト処理を返し、Webページが通常通り入力を受け取る。
-            if (!_isWebMode)
-            {
-                handled = true;
-                return new IntPtr(HTTRANSPARENT);
-            }
-            return IntPtr.Zero;
-        }
-
-        /// <summary>
-        /// 入力遮断オーバーレイを Z-order 上でメインウィンドウの直下に固定する。
-        /// メインウィンドウが HTTRANSPARENT のとき、透過した入力は必ずこのオーバーレイに届く。
-        /// </summary>
-        private void PinOverlayBelowMain()
-        {
-            SetWindowPos(
-                new WindowInteropHelper(_overlay).EnsureHandle(),
-                new WindowInteropHelper(this).EnsureHandle(),
-                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-
-        [DllImport("user32.dll")]
-        private static extern bool SetFocus(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern int GetSystemMetrics(int nIndex);
-
-        private const int SM_XVIRTUALSCREEN = 76;
-        private const int SM_YVIRTUALSCREEN = 77;
-        private const int SM_CXVIRTUALSCREEN = 78;
-        private const int SM_CYVIRTUALSCREEN = 79;
-
-        private const uint SWP_FRAMECHANGED = 0x0020;
-        private const uint SWP_NOZORDER = 0x0004;
-
-        /// <summary>
-        /// メインウィンドウ自体を OS レベルでマウスヒットテスト不能にする（ウィンドウモード時）。
-        /// 単なる WM_NCHITTEST=HTTRANSPARENT では、レイヤーウィンドウのレイヤー bitmap が不透明な
-        /// 領域では OS が WM_NCHITTEST を送らず WebView2 のネイティブ子HWNDに入力が渡る場合があるため、
-        /// WS_EX_TRANSPARENT を付与してウィンドウ全体（子HWND含む）をヒットテストから除外する。
-        /// 透過した入力は Z-order 直下の入力遮断オーバーレイに届く。
-        /// </summary>
-        private void SetMainHitTestTransparent(bool transparent)
-        {
-            try
-            {
-                IntPtr hwnd = new WindowInteropHelper(this).Handle;
-                int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-                if (transparent) ex |= WS_EX_TRANSPARENT;
-                else ex &= ~WS_EX_TRANSPARENT;
-                SetWindowLong(hwnd, GWL_EXSTYLE, ex);
-                // スタイル変更を即座に適用（位置・サイズ・Z-order は維持）
-                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
-                LogDebug($"Main WS_EX_TRANSPARENT = {transparent} (ex=0x{ex:X})");
-            }
-            catch (Exception ex)
-            {
-                LogDebug("SetMainHitTestTransparent error: " + ex.Message);
-            }
-        }
-
-        /// <summary>オーバーレイ / コントロールバー / 復帰ボタンをメインウィンドウの位置・サイズに追従させる。</summary>
-        private void UpdateFloatingWindows()
-        {
-            if (double.IsNaN(Left) || double.IsNaN(Top)) return;
-            _overlay.Left = Left;
-            _overlay.Top = Top;
-            _overlay.Width = Width;
-            _overlay.Height = Height;
-            PositionControlBar();
-            PositionWebModeButtonWindow();
-            PositionResizeBands();
-        }
-
-        /// <summary>浮遊コントロールバーを右上に配置する。Webモードの復帰バーと同じアンカー（右端8px・上8px）で揃え、同一位置で切り替わるようにする。</summary>
-        private void PositionControlBar()
-        {
-            if (_controlBar is not { Visibility: Visibility.Visible }) return;
-            // 復帰バーと同じ幅・位置（右上）に配置し、同じ位置で切り替わるようにする
-            _controlBar.Left = Left + Width - _controlBar.Width - 8;
-            _controlBar.Top = Top + 8;
-        }
-
-        /// <summary>
-        /// Webモード用復帰ボタンのミニウィンドウ。
-        /// WebView2 のネイティブHWND は WPF レンダリング面の上に存在するため、
-        /// WPF 要素として復帰ボタンを描いてもクリックできない。独立した Topmost ウィンドウとすることで
-        /// 常にネイティブHWND より手前に表示される。
-        /// </summary>
-        private Window? _webModeButtonWindow;
-        private DispatcherTimer? _webModePinTimer;
-
-        private void ShowWebModeButtonWindow()
-        {
-            if (_webModeButtonWindow is null)
-            {
-                var button = new Button
-                {
-                    Width = 46,
-                    Height = 32,
-                    Cursor = Cursors.Hand,
-                    ToolTip = "ウィンドウ操作に戻る",
-                    Template = CreateReturnButtonTemplate(),
-                    Content = new Viewbox
-                    {
-                        Width = 20,
-                        Height = 16,
-                        Child = new System.Windows.Shapes.Path
-                        {
-                            // geometry は原点起点・描画実寸を Path のサイズに明示し、Viewbox が正しく中央配置する
-                            Data = Geometry.Parse("M 0.75,0.75 L 20.75,0.75 L 20.75,16.75 L 0.75,16.75 Z M 0.75,6.75 L 20.75,6.75"),
-                            Width = 21.5,
-                            Height = 17.5,
-                            Stroke = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)),
-                            StrokeThickness = 1.5,
-                            Fill = Brushes.Transparent,
-                            SnapsToDevicePixels = true,
-                        },
-                    },
-                };
-                button.Click += (s, e) => SetWebMode(false);
-
-                var label = new TextBlock
-                {
-                    Text = "クリックで戻ります",
-                    Foreground = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(10, 0, 8, 0),
-                };
-
-                // ボタンはバーの左端に配置する。復帰バーはコントロールバーと同一位置・同一幅のため、
-                // このボタンはウィンドウモードの WebToggle（先頭・左端）と完全に重なる位置になり、
-                // モード切替で同じ場所のまま「⚡ → 復帰ボタン＋ラベル」に切り替わるように見える。
-                var panel = new StackPanel { Orientation = Orientation.Horizontal };
-                panel.Children.Add(button);
-                panel.Children.Add(label);
-
-                _webModeButtonWindow = new Window
-                {
-                    WindowStyle = WindowStyle.None,
-                    AllowsTransparency = true,
-                    Background = Brushes.Transparent,
-                    Topmost = true,
-                    ShowInTaskbar = false,
-                    // コントロールバーと同じ幅・位置（左寄せ）の復帰バー
-                    Width = 230,
-                    Height = 32,
-                    Content = new Border
-                    {
-                        CornerRadius = new CornerRadius(8),
-                        Background = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF)),
-                        Child = panel,
-                    },
-                };
-            }
-            // コントロールバーと同じ位置（右上・8pxオフセット）に配置する
-            _webModeButtonWindow.Left = Left + Width - _webModeButtonWindow.Width - 8;
-            _webModeButtonWindow.Top = Top + 8;
-            _webModeButtonWindow.Show();
-            _webModeButtonWindow.Activate();
-            LogWebModeButtonState("after Show/Activate");
-            // WPF の非同期処理（アクティベーションによる Topmost 再アサート等）完了後の状態も記録する
-            Dispatcher.BeginInvoke(new Action(() => LogWebModeButtonState("after dispatcher idle")), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
-            StartWebModePinTimer();
-        }
-
-        /// <summary>
-        /// Webモード中、復帰ボタンがメインウィンドウより上（前面）にあることを維持する。
-        /// メインウィンドウがアクティベートされるたびに WPF が Topmost を再アサートし
-        /// topmost 帯内でメインが最前面に上がるため、復帰ボタンが WebView2 に隠れてしまう。
-        /// </summary>
-        private void StartWebModePinTimer()
-        {
-            if (_webModePinTimer is null)
-            {
-                _webModePinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
-                _webModePinTimer.Tick += (_, __) => PinWebModeButtonAboveMain();
-            }
-            _webModePinTimer.Start();
-        }
-
-        private void StopWebModePinTimer()
-        {
-            _webModePinTimer?.Stop();
-        }
-
-        /// <summary>復帰ボタン・リサイズ帯がすべてメインより上（正しいZ-order）にあることを維持する。</summary>
-        private void PinWebModeButtonAboveMain()
-        {
-            if (!_isWebMode) return;
-            try
-            {
-                IntPtr bh = _webModeButtonWindow is not null
-                    ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle()
-                    : IntPtr.Zero;
-                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
-                // topmost 帯の先頭から走査し、メインより上（前面）にある HWND を集める。
-                // 復帰ボタンの位置だけで打ち切ると「ボタン > メイン > リサイズ帯」の違反を見逃すため、
-                // メインに当たるまで必ず走査しきる。
-                var aboveMain = new HashSet<IntPtr>();
-                IntPtr h = GetTopWindow(IntPtr.Zero);
-                for (int i = 0; h != IntPtr.Zero && i < 200; i++)
-                {
-                    if (h == mh) break; // ここより下はメインの裏側
-                    aboveMain.Add(h);
-                    h = GetWindow(h, GW_HWNDNEXT);
-                }
-                bool needPin = false;
-                if (_webModeButtonWindow is { IsVisible: true } && !aboveMain.Contains(bh)) needPin = true;
-                foreach (var b in _resizeBands)
-                {
-                    if (b.IsVisible && !aboveMain.Contains(new WindowInteropHelper(b).EnsureHandle())) { needPin = true; break; }
-                }
-                if (!needPin) return;
-                LogDebug("[webmode-btn] z-order violation detected -> re-pinning (button>bands>main)");
-                // メインを帯の最前へ上げてから、リサイズ帯 > 復帰ボタンの順で前面に再固定する
-                SetWindowPos(mh, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); // HWND_TOP
-                foreach (var b in _resizeBands)
-                {
-                    if (b.IsVisible) BringToFront(new WindowInteropHelper(b).EnsureHandle());
-                }
-                if (_webModeButtonWindow is { IsVisible: true }) BringToFront(bh);
-            }
-            catch
-            {
-                // 診断・再固定の失敗は無視（次回タイマーで再試行）
-            }
-        }
-
-        /// <summary>復帰ボタンウィンドウの表示状態・矩形・topmost帯内Z-order を診断ログに出力する。</summary>
-        private void LogWebModeButtonState(string when)
-        {
-            try
-            {
-                if (_webModeButtonWindow is null) return;
-                IntPtr bh = new WindowInteropHelper(_webModeButtonWindow).EnsureHandle();
-                IntPtr mh = new WindowInteropHelper(this).EnsureHandle();
-                RECT br, mr;
-                GetWindowRect(bh, out br);
-                GetWindowRect(mh, out mr);
-                // topmost帯内での相対位置: main の上（前方）にボタンがあるか
-                int idx = -1;
-                IntPtr h = GetTopWindow(IntPtr.Zero);
-                for (int i = 0; h != IntPtr.Zero && i < 200; i++)
-                {
-                    if (h == bh) { idx = i; break; }
-                    if (h == mh) break; // main に先に当たった = ボタンは main より下
-                    h = GetWindow(h, GW_HWNDNEXT);
-                }
-                LogDebug($"[webmode-btn] {when}: btn=0x{bh.ToInt64():X} visible={_webModeButtonWindow.IsVisible} rect=({br.Left},{br.Top})-({br.Right},{br.Bottom}) mainRect=({mr.Left},{mr.Top})-({mr.Right},{mr.Bottom}) zIdx={idx} (mainに先着=-1でボタンがmainの下)");
-            }
-            catch (Exception ex)
-            {
-                LogDebug("[webmode-btn] 診断失敗: " + ex.Message);
-            }
-        }
-
-        private void HideWebModeButtonWindow()
-        {
-            _webModeButtonWindow?.Hide();
-        }
-
-        private void PositionWebModeButtonWindow()
-        {
-            if (_webModeButtonWindow is null || _webModeButtonWindow.Visibility != Visibility.Visible) return;
-            // コントロールバーと同じ位置（右上・8pxオフセット）に追従させる
-            _webModeButtonWindow.Left = Left + Width - _webModeButtonWindow.Width - 8;
-            _webModeButtonWindow.Top = Top + 8;
-        }
-
-        private static ControlTemplate CreateReturnButtonTemplate()
-        {
-            // コントロールバーのボタンと同様のスタイル（透明背景・ホバー時に薄い黒系ハイライト）
-            var border = new FrameworkElementFactory(typeof(Border));
-            border.Name = "BtnBorder";
-            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
-            border.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-
-            var content = new FrameworkElementFactory(typeof(ContentPresenter));
-            content.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            content.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            border.AppendChild(content);
-
-            // ホバー時に背景色を変更する
-            var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-            hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty,
-                new SolidColorBrush(Color.FromArgb(0x40, 0x00, 0x00, 0x00)), "BtnBorder"));
-
-            var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
-            template.Triggers.Add(hoverTrigger);
-            return template;
-        }
-
-        private const int GWL_EXSTYLE = -20;
-        private const int WS_EX_TRANSPARENT = 0x00000020;
-        private const int WS_EX_NOACTIVATE = 0x08000000;
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-        private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
-
-        /// <summary>メインウィンドウ配下のネイティブウィンドウツリーを debug.log に出力する（診断用）。</summary>
-        private void LogWindowTree()
-        {
-            try
-            {
-                var sb = new StringBuilder();
-                AppendWindowTree(new WindowInteropHelper(this).Handle, sb, "  ");
-                LogDebug("ウィンドウツリー:\n" + sb.ToString());
-            }
-            catch
-            {
-                // 診断ログ失敗は無視
-            }
-        }
-
-        private static void AppendWindowTree(IntPtr parent, StringBuilder sb, string indent)
-        {
-            EnumChildWindows(parent, (hWnd, _) =>
-            {
-                var name = new StringBuilder(256);
-                GetClassName(hWnd, name, name.Capacity);
-                int ex = GetWindowLong(hWnd, GWL_EXSTYLE);
-                bool transparent = (ex & WS_EX_TRANSPARENT) != 0;
-                bool noActivate = (ex & WS_EX_NOACTIVATE) != 0;
-                sb.AppendLine($"{indent}[{hWnd.ToInt64():X}] \"{name}\" TRANSPARENT={transparent} NOACTIVATE={noActivate}");
-                AppendWindowTree(hWnd, sb, indent + "  ");
-                return true;
-            }, IntPtr.Zero);
-        }
-
-        internal void ApplyOpacity(double opacity)
-        {
-            opacity = Math.Clamp(opacity, 0.2, 1.0);
-            Opacity = opacity;
-
-            // WebView2 は HwndHost であり WPF の Opacity 影響を受けないため、
-            // Win32 API でネイティブHWNDの不透明度を別途設定する。
-            try
-            {
-                IntPtr mainHwnd = new WindowInteropHelper(this).Handle;
-                IntPtr webHwnd = FindWindowEx(mainHwnd, IntPtr.Zero, "Chrome_WidgetWin_1", null);
-                if (webHwnd != IntPtr.Zero)
-                {
-                    byte alpha = (byte)(255 * opacity);
-                    SetLayeredWindowAttributes(webHwnd, 0, alpha, LWA_ALPHA);
-                }
-            }
-            catch
-            {
-                // WebView2 がまだ初期化されていない場合等に無視
-            }
-        }
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint crKey, byte bAlpha, uint dwFlags);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
-
-        private const uint LWA_ALPHA = 0x2;
-
-        private void NavigateToUrl(string url)
-        {
-            try
-            {
-                if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                {
-                    WebView.Source = uri;
-                    LogDebug($"Navigate: {url}");
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    $"URL の読み込みに失敗しました。\n{ex.Message}",
-                    "読み込みエラー", MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-        }
-
-        /// <summary>設定ディレクトリにデバッグログを書き出す。</summary>
-        private static void LogDebug(string message)
-        {
-            try
-            {
-                Directory.CreateDirectory(SettingsDirectory);
-                File.AppendAllText(
-                    Path.Combine(SettingsDirectory, "debug.log"),
-                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
-            }
-            catch
-            {
-                // ログ書き込み失敗は無視
-            }
-        }
-
-        private AppSettings? LoadSettings()
-        {
-            try
-            {
-                if (!File.Exists(SettingsPath)) return null;
-                var json = File.ReadAllText(SettingsPath);
-                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                var settings = JsonSerializer.Deserialize<AppSettings>(json, options);
-                if (settings is null) return null;
-                settings.Opacity = Math.Clamp(settings.Opacity, 0.2, 1.0);
-                return settings;
-            }
-            catch (Exception ex)
-            {
-                LogDebug($"LoadSettingsエラー: {ex}");
-                return null;
-            }
-        }
-
-        private void SaveSettings(string url, double opacity, Rect? windowBounds = null)
-        {
-            // 既存設定をマージして保存する（WindowBounds を渡さなかった場合、既存値を保持する）
-            var existing = LoadSettings();
-            var settings = new AppSettings
-            {
-                Url = url,
-                Opacity = Math.Clamp(opacity, 0.2, 1.0),
-                WindowBounds = windowBounds is not null
-                    ? new WindowBounds(windowBounds.Value)
-                    : existing?.WindowBounds,
-            };
-            try
-            {
-                Directory.CreateDirectory(SettingsDirectory);
-                File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"設定の保存に失敗しました。\n{ex.Message}", "保存エラー", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        private const string PlaceholderHtml = """
-            <!DOCTYPE html>
-            <html lang="ja"><head><meta charset="utf-8">
-            <style>html,body{margin:0;height:100%}body{display:flex;align-items:center;justify-content:center;background:#1E1E2E;color:#B0B0C0;font-family:"Segoe UI","Yu Gothic UI",sans-serif;font-size:15px;text-align:center;line-height:2}</style>
-            </head><body><div>接続先URLが設定されていません<br/>右上のメニュー（≡）ボタンから設定してください</div></body></html>
-            """;
-
-        public sealed class AppSettings
-        {
-            public string Url { get; set; } = string.Empty;
-            public double Opacity { get; set; } = 1.0;
-            public WindowBounds? WindowBounds { get; set; }
-        }
-
-        /// <summary>ウィンドウの位置・サイズ（DIP）。settings.json に永続化する。</summary>
-        public sealed class WindowBounds
-        {
-            public double Left { get; set; }
-            public double Top { get; set; }
-            public double Width { get; set; }
-            public double Height { get; set; }
-
-            public WindowBounds() { }
-
-            public WindowBounds(Rect r)
-            {
-                Left = r.Left; Top = r.Top; Width = r.Width; Height = r.Height;
-            }
-
-            public Rect ToRect() => new(Left, Top, Width, Height);
-        }
-
-        /// <summary>仮想デスクトップ（全モニターの合成領域）を DIP 単位で取得する。</summary>
-        private Rect GetVirtualScreenRect()
-        {
-            var src = (HwndSource)PresentationSource.FromVisual(this);
-            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
-            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
-            return new Rect(GetSystemMetrics(SM_XVIRTUALSCREEN) / sx, GetSystemMetrics(SM_YVIRTUALSCREEN) / sy,
-                            GetSystemMetrics(SM_CXVIRTUALSCREEN) / sx, GetSystemMetrics(SM_CYVIRTUALSCREEN) / sy);
-        }
-
-        /// <summary>
-        /// 起動時のウィンドウ位置・サイズを設定。前回終了時に保存した値を復元し、
-        /// その位置が現在の仮想デスクトップ（全モニターの合成領域）の外にある場合は
-        /// （例: サブモニターが外された）プライマリモニター作業領域中央へフォールバックする。
-        /// </summary>
-        private void RestoreWindowPosition(AppSettings? settings)
-        {
-            var saved = settings?.WindowBounds;
-            if (saved is not null
-                && double.IsFinite(saved.Left) && double.IsFinite(saved.Top)
-                && saved.Width >= ResizeMinWidth && saved.Height >= ResizeMinHeight)
-            {
-                var rect = saved.ToRect();
-                // 仮想デスクトップと交差すれば表示可能とみなす
-                var intersection = rect;
-                intersection.Intersect(GetVirtualScreenRect());
-                if (!intersection.IsEmpty)
-                {
-                    Left = saved.Left;
-                    Top = saved.Top;
-                    Width = saved.Width;
-                    Height = saved.Height;
-                    LogDebug($"起動: 保存済み位置を復元 ({saved.Left},{saved.Top},{saved.Width:F0}x{saved.Height:F0})");
-                    return;
-                }
-                LogDebug($"起動: 保存済み位置がオフスクリーン ({saved.Left},{saved.Top}) -> プライマリモニター中央へフォールバック");
-                // サイズは保存値を維持し、位置のみフォールバックする
-                Width = saved.Width;
-                Height = saved.Height;
-            }
-
-            // 初回起動またはオフスクリーン: プライマリモニター作業領域中央
-            var workArea = SystemParameters.WorkArea;
-            Left = workArea.Left + (workArea.Width - Width) / 2;
-            Top = workArea.Top + (workArea.Height - Height) / 2;
-        }
-
-        /// <summary>終了時にウィンドウの位置・サイズを設定へ保存する（最大化中は通常サイズの矩形を保存）。</summary>
-        private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
-        {
-            var bounds = _isMaximized ? _normalBounds : new Rect(Left, Top, Width, Height);
-            LogDebug($"終了: 位置・サイズを保存 ({bounds.Left},{bounds.Top},{bounds.Width:F0}x{bounds.Height:F0})");
-            SaveSettings(_currentUrl, Opacity, bounds);
-        }
-    }
+	[Flags]
+	private enum ResizeEdge
+	{
+		None = 0,
+		Left = 1,
+		Right = 2,
+		Top = 4,
+		Bottom = 8
+	}
+
+	private struct POINT
+	{
+		public int X;
+
+		public int Y;
+	}
+
+	private struct RECT
+	{
+		public int Left;
+
+		public int Top;
+
+		public int Right;
+
+		public int Bottom;
+	}
+
+	private delegate bool EnumChildProc(nint hWnd, nint lParam);
+
+	public sealed class AppSettings
+	{
+		public string Url { get; set; } = string.Empty;
+
+		public double Opacity { get; set; } = 1.0;
+
+		public WindowBounds? WindowBounds { get; set; }
+	}
+
+	public sealed class WindowBounds
+	{
+		public double Left { get; set; }
+
+		public double Top { get; set; }
+
+		public double Width { get; set; }
+
+		public double Height { get; set; }
+
+		public WindowBounds()
+		{
+		}
+
+		public WindowBounds(Rect r)
+		{
+			Left = r.Left;
+			Top = r.Top;
+			Width = r.Width;
+			Height = r.Height;
+		}
+
+		public Rect ToRect()
+		{
+			return new Rect(Left, Top, Width, Height);
+		}
+	}
+
+	private static readonly string SettingsDirectory = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DGXSparkUtilWidget");
+
+	private static readonly string SettingsPath = System.IO.Path.Combine(SettingsDirectory, "settings.json");
+
+	private string _currentUrl = string.Empty;
+
+	private bool _isMaximized;
+
+	private Rect _normalBounds;
+
+	private DispatcherTimer? _hideTimer;
+
+	private DispatcherTimer? _hoverWatchdog;
+
+	private ControlBarWindow _controlBar = null;
+
+	private Window _overlay = null;
+
+	private bool _isDragging;
+
+	private System.Windows.Point _dragStartScreenMouse;
+
+	private System.Windows.Point _dragStartPos;
+
+	private const double ResizeBand = 8.0;
+
+	private const double ResizeMinWidth = 400.0;
+
+	private const double ResizeMinHeight = 300.0;
+
+	private bool _isResizing;
+
+	private int _staleShowCount;
+
+	private bool _hidePending;
+
+	private int _resizeEdge;
+
+	private System.Windows.Point _resizeStartScreenMouse;
+
+	private Rect _resizeStartBounds;
+
+	private Window[] _resizeBands = null;
+
+	private bool _isWebMode;
+
+	private double _pageOpacity = 1.0;
+
+	// WebView2 ホストウィンドウ（Chrome_WidgetWin_1）のHWND。LWA_ALPHA の適用先。
+	private nint _webViewHostHwnd;
+
+	// LWA_ALPHA を定期再適用するウォッチドッグタイマー。
+	private DispatcherTimer? _alphaWatchdog;
+
+	private bool _wasWebMode;
+
+	private HwndSource? _mainHwndSource;
+
+	private int _hitTestLogCount;
+
+	private const int WM_NCHITTEST = 132;
+
+	private const int HTCLIENT = 1;
+
+	private const int HTTRANSPARENT = -1;
+
+	private const uint GW_HWNDNEXT = 2u;
+
+	private static readonly nint HWND_TOP = IntPtr.Zero;
+
+	private const uint SWP_NOMOVE = 2u;
+
+	private const uint SWP_NOSIZE = 1u;
+
+	private const uint SWP_NOACTIVATE = 16u;
+
+	private const int SM_XVIRTUALSCREEN = 76;
+
+	private const int SM_YVIRTUALSCREEN = 77;
+
+	private const int SM_CXVIRTUALSCREEN = 78;
+
+	private const int SM_CYVIRTUALSCREEN = 79;
+
+	private const uint SWP_FRAMECHANGED = 32u;
+
+	private const uint SWP_NOZORDER = 4u;
+
+	private Window? _webModeButtonWindow;
+
+	private DispatcherTimer? _webModePinTimer;
+
+	private const int GWL_EXSTYLE = -20;
+
+	private const int WS_EX_TRANSPARENT = 32;
+
+	private const int WS_EX_NOACTIVATE = 134217728;
+
+	private const string PlaceholderHtml = "<!DOCTYPE html>\r\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\r\n<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;justify-content:center;background:#1E1E2E;color:#B0B0C0;font-family:\"Segoe UI\",\"Yu Gothic UI\",sans-serif;font-size:15px;text-align:center;line-height:2}</style>\r\n</head><body><div>接続先URLが設定されていません<br/>右上のメニュー（≡）ボタンから設定してください</div></body></html>";
+
+
+	public MainWindow()
+	{
+		InitializeComponent();
+		RestoreWindowPosition(LoadSettings());
+		base.Closing += OnWindowClosing;
+		_normalBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+		_controlBar = CreateControlBarWindow();
+		_overlay = CreateOverlayWindow();
+		_resizeBands = CreateResizeBands();
+		base.SourceInitialized += OnSourceInitialized;
+		base.LocationChanged += delegate
+		{
+			UpdateFloatingWindows();
+		};
+		base.SizeChanged += delegate
+		{
+			UpdateFloatingWindows();
+		};
+		base.Activated += delegate
+		{
+			if (!_isWebMode)
+			{
+				if (_overlay.Visibility == Visibility.Visible)
+				{
+					PinOverlayBelowMain();
+				}
+				if (_controlBar.Visibility == Visibility.Visible)
+				{
+					BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
+				}
+			}
+		};
+		base.StateChanged += delegate
+		{
+			if (base.WindowState == WindowState.Minimized)
+			{
+				_overlay.Hide();
+				Window[] resizeBands = _resizeBands;
+				foreach (Window window in resizeBands)
+				{
+					window.Hide();
+				}
+				_controlBar.Hide();
+				_webModeButtonWindow?.Hide();
+			}
+			else if (_isWebMode)
+			{
+				ShowResizeBands();
+				ShowWebModeButtonWindow();
+			}
+			else
+			{
+				ShowOverlay();
+			}
+		};
+	}
+
+	private void OnSourceInitialized(object? sender, EventArgs e)
+	{
+		_mainHwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+		LogDebug($"SourceInitialized: HwndSource=({_mainHwndSource != null}), MainHwnd=0x{((IntPtr)new WindowInteropHelper(this).Handle).ToInt64():X}");
+		_mainHwndSource?.AddHook(OnMainWindowHook);
+	}
+
+	private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+	{
+		SetWebMode(webMode: false);
+		StartHoverWatchdog();
+		try
+		{
+			await WebView.EnsureCoreWebView2Async();
+		}
+		catch (Exception ex)
+		{
+			Exception ex2 = ex;
+			MessageBox.Show("WebView2 の初期化に失敗しました。\nWebView2 Runtime を確認してください。\n\n詳細: " + ex2.Message, "初期化エラー", MessageBoxButton.OK, MessageBoxImage.Hand);
+			Close();
+			return;
+		}
+		// WebView2 サーフェス自体をピクセル単位で透明にする（全体透過の前提）。
+		// 背後の WPF レイヤーは完全透明なので、Web コンテンツの alpha がそのままデスクトップへの透過になる。
+		WebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+		WebView.CoreWebView2.NavigationCompleted += delegate
+		{
+			LogWindowTree();
+		};
+		// フルナビゲーションでドキュメントが置き換わっても WebView2 ホストHWND は再利用されるため、
+		// 初期化後に一度見つかれば以降はそのまま LWA_ALPHA を適用し続ける。
+		StartWebViewAlphaFinder();
+		AppSettings settings = LoadSettings();
+		LogDebug($"起動: 設定読込={settings != null}, Url={settings?.Url}, Opacity={settings?.Opacity}");
+		if (settings != null && !string.IsNullOrWhiteSpace(settings.Url))
+		{
+			_currentUrl = settings.Url;
+			ApplyOpacity(settings.Opacity);
+			NavigateToUrl(settings.Url);
+			return;
+		}
+		_overlay.Hide();
+		try
+		{
+			SettingsDialog dialog = new SettingsDialog(string.Empty, 1.0)
+			{
+				Owner = this
+			};
+			if (dialog.ShowDialog() == true)
+			{
+				SaveSettings(dialog.Url, dialog.OpacityValue, null);
+				_currentUrl = dialog.Url;
+				ApplyOpacity(dialog.OpacityValue);
+				NavigateToUrl(dialog.Url);
+			}
+			else
+			{
+				WebView.CoreWebView2?.NavigateToString("<!DOCTYPE html>\r\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\r\n<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;justify-content:center;background:#1E1E2E;color:#B0B0C0;font-family:\"Segoe UI\",\"Yu Gothic UI\",sans-serif;font-size:15px;text-align:center;line-height:2}</style>\r\n</head><body><div>接続先URLが設定されていません<br/>右上のメニュー（≡）ボタンから設定してください</div></body></html>");
+			}
+		}
+		finally
+		{
+			if (!_isWebMode)
+			{
+				ShowOverlay();
+			}
+		}
+	}
+
+	private void RootBorder_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+	{
+		if (e.ButtonState != MouseButtonState.Pressed)
+		{
+			return;
+		}
+		if (e.OriginalSource is UIElement uIElement)
+		{
+			for (DependencyObject dependencyObject = uIElement; dependencyObject != null; dependencyObject = VisualTreeHelper.GetParent(dependencyObject))
+			{
+				if ((dependencyObject is Button || dependencyObject is TextBox || dependencyObject is Slider) ? true : false)
+				{
+					return;
+				}
+			}
+		}
+		ShowControlBar();
+		try
+		{
+			DragMove();
+		}
+		catch (InvalidOperationException)
+		{
+		}
+	}
+
+	private void RootBorder_MouseEnter(object sender, MouseEventArgs e)
+	{
+		ShowControlBar();
+	}
+
+	private void RootBorder_MouseLeave(object sender, MouseEventArgs e)
+	{
+		HideControlBar();
+	}
+
+	private void ShowControlBar()
+	{
+		if (!_isDragging && !_isResizing)
+		{
+			GetCursorPos(out var pt);
+			HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+			double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+			double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+			double num3 = (double)pt.X / num;
+			double num4 = (double)pt.Y / num2;
+			bool flag = num3 >= base.Left && num3 <= base.Left + base.Width && num4 >= base.Top && num4 <= base.Top + base.Height;
+			bool flag2 = _controlBar.Visibility == Visibility.Visible && num3 >= _controlBar.Left && num3 <= _controlBar.Left + _controlBar.Width && num4 >= _controlBar.Top && num4 <= _controlBar.Top + _controlBar.Height;
+			if (!flag && !flag2)
+			{
+				_staleShowCount++;
+				if (_staleShowCount % 10 == 1)
+				{
+					LogDebug($"ShowControlBar: cursor outside (x={pt.X},y={pt.Y}) -> skip (stale count={_staleShowCount})");
+				}
+				return;
+			}
+		}
+		_staleShowCount = 0;
+		_hidePending = false;
+		_hideTimer?.Stop();
+		if (_controlBar.Visibility != 0)
+		{
+			LogDebug($"ShowControlBar: hidden bar -> show (opacity={_controlBar.Opacity:F2})");
+			_controlBar.Show();
+			PositionControlBar();
+		}
+		BringToFront(new WindowInteropHelper(_controlBar).EnsureHandle());
+		if (_controlBar.Opacity < 0.5)
+		{
+			DoubleAnimation animation = new DoubleAnimation(_controlBar.Opacity, 1.0, new Duration(TimeSpan.FromMilliseconds(250L, 0L)))
+			{
+				EasingFunction = new QuadraticEase
+				{
+					EasingMode = EasingMode.EaseOut
+				}
+			};
+			_controlBar.BeginAnimation(UIElement.OpacityProperty, animation);
+		}
+	}
+
+	private void HideControlBar()
+	{
+		if (_isResizing || _hidePending)
+		{
+			return;
+		}
+		_hidePending = true;
+		_hideTimer?.Stop();
+		_hideTimer = new DispatcherTimer
+		{
+			Interval = TimeSpan.FromMilliseconds(300L, 0L)
+		};
+		_hideTimer.Tick += delegate
+		{
+			_hideTimer.Stop();
+			if (_controlBar.Opacity > 0.5)
+			{
+				DoubleAnimation doubleAnimation = new DoubleAnimation(_controlBar.Opacity, 0.0, new Duration(TimeSpan.FromMilliseconds(350L, 0L)))
+				{
+					EasingFunction = new QuadraticEase
+					{
+						EasingMode = EasingMode.EaseOut
+					}
+				};
+				doubleAnimation.Completed += delegate
+				{
+					if (_controlBar.Opacity < 0.5)
+					{
+						LogDebug("control bar -> Hide() (fade-out complete)");
+						_hidePending = false;
+						_controlBar.Hide();
+					}
+				};
+				_controlBar.BeginAnimation(UIElement.OpacityProperty, doubleAnimation);
+			}
+			else
+			{
+				LogDebug("control bar -> Hide() (already faded)");
+				_hidePending = false;
+				_controlBar.Hide();
+			}
+		};
+		_hideTimer.Start();
+	}
+
+	private void StartHoverWatchdog()
+	{
+		if (_hoverWatchdog == null)
+		{
+			_hoverWatchdog = new DispatcherTimer
+			{
+				Interval = TimeSpan.FromMilliseconds(250L, 0L)
+			};
+			_hoverWatchdog.Tick += delegate
+			{
+				HoverWatchdogTick();
+			};
+			_hoverWatchdog.Start();
+		}
+	}
+
+	private void StopHoverWatchdog()
+	{
+		_hoverWatchdog?.Stop();
+	}
+
+	private void HoverWatchdogTick()
+	{
+		if (_isWebMode || double.IsNaN(base.Left))
+		{
+			return;
+		}
+		GetCursorPos(out var pt);
+		HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+		double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+		double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+		double num3 = (double)pt.X / num;
+		double num4 = (double)pt.Y / num2;
+		if (num3 >= base.Left && num3 <= base.Left + base.Width && num4 >= base.Top && num4 <= base.Top + base.Height)
+		{
+			if (_controlBar.Visibility != 0)
+			{
+				LogDebug("hover watchdog: cursor inside but bar hidden -> show");
+			}
+			ShowControlBar();
+		}
+		else
+		{
+			HideControlBar();
+		}
+	}
+
+	private void BtnMinimize_Click(object sender, RoutedEventArgs e)
+	{
+		base.WindowState = WindowState.Minimized;
+	}
+
+	private void BtnMaximizeRestore_Click(object sender, RoutedEventArgs e)
+	{
+		if (!_isMaximized)
+		{
+			_normalBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+			Rect workArea = SystemParameters.WorkArea;
+			base.Left = workArea.Left;
+			base.Top = workArea.Top;
+			base.Width = workArea.Width;
+			base.Height = workArea.Height;
+			_isMaximized = true;
+			_controlBar.SetMaximizeIcon(isMaximized: true);
+		}
+		else
+		{
+			base.Left = _normalBounds.Left;
+			base.Top = _normalBounds.Top;
+			base.Width = _normalBounds.Width;
+			base.Height = _normalBounds.Height;
+			_isMaximized = false;
+			_controlBar.SetMaximizeIcon(isMaximized: false);
+		}
+	}
+
+	private void BtnClose_Click(object sender, RoutedEventArgs e)
+	{
+		Application.Current.Shutdown();
+	}
+
+	private void BtnMenu_Click(object sender, RoutedEventArgs e)
+	{
+		_overlay.Hide();
+		try
+		{
+			SettingsDialog settingsDialog = new SettingsDialog(_currentUrl, _pageOpacity)
+			{
+				Owner = this
+			};
+			if (settingsDialog.ShowDialog() == true)
+			{
+				SaveSettings(settingsDialog.Url, settingsDialog.OpacityValue, null);
+				_currentUrl = settingsDialog.Url;
+				ApplyOpacity(settingsDialog.OpacityValue);
+				NavigateToUrl(settingsDialog.Url);
+			}
+		}
+		finally
+		{
+			if (!_isWebMode)
+			{
+				ShowOverlay();
+			}
+		}
+	}
+
+	private void BtnWebToggle_Click(object sender, RoutedEventArgs e)
+	{
+		SetWebMode(webMode: true);
+	}
+
+	private void SetWebMode(bool webMode)
+	{
+		_isWebMode = webMode;
+		if (webMode)
+		{
+			_overlay.Hide();
+			ShowResizeBands();
+			_hideTimer?.Stop();
+			StopHoverWatchdog();
+			_controlBar.Hide();
+			ShowWebModeButtonWindow();
+			SetMainHitTestTransparent(transparent: false);
+			PinWebModeButtonAboveMain();
+		}
+		else
+		{
+			ShowOverlay();
+			Window[] resizeBands = _resizeBands;
+			foreach (Window window in resizeBands)
+			{
+				window.Hide();
+			}
+			HideWebModeButtonWindow();
+			StopWebModePinTimer();
+			StartHoverWatchdog();
+			if (_wasWebMode)
+			{
+				ShowControlBar();
+			}
+			SetMainHitTestTransparent(transparent: true);
+		}
+		_wasWebMode = webMode;
+	}
+
+	private Window CreateOverlayWindow()
+	{
+		SolidColorBrush background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(1, 0, 0, 0));
+		Window overlay = new Window
+		{
+			WindowStyle = WindowStyle.None,
+			AllowsTransparency = true,
+			Background = background,
+			Topmost = true,
+			ShowInTaskbar = false,
+			ResizeMode = ResizeMode.NoResize
+		};
+		overlay.Content = new Border
+		{
+			Background = background
+		};
+		overlay.Loaded += delegate
+		{
+			nint handle = new WindowInteropHelper(overlay).Handle;
+			int windowLong = GetWindowLong(handle, -20);
+			SetWindowLong(handle, -20, windowLong | 0x8000000);
+		};
+		overlay.MouseDown += Overlay_MouseDown;
+		overlay.MouseMove += Overlay_MouseMove;
+		overlay.MouseUp += Overlay_MouseUp;
+		overlay.MouseEnter += delegate
+		{
+			LogDebug("overlay MouseEnter -> ShowControlBar");
+			ShowControlBar();
+		};
+		overlay.MouseLeave += delegate
+		{
+			LogDebug("overlay MouseLeave -> HideControlBar");
+			HideControlBar();
+		};
+		return overlay;
+	}
+
+	private ControlBarWindow CreateControlBarWindow()
+	{
+		ControlBarWindow bar = new ControlBarWindow();
+		bar.Loaded += delegate
+		{
+			nint hWnd = new WindowInteropHelper(bar).EnsureHandle();
+			int windowLong = GetWindowLong(hWnd, -20);
+			SetWindowLong(hWnd, -20, windowLong | 0x8000000);
+		};
+		bar.BtnMinimize.Click += BtnMinimize_Click;
+		bar.BtnMaximizeRestore.Click += BtnMaximizeRestore_Click;
+		bar.BtnClose.Click += BtnClose_Click;
+		bar.BtnMenu.Click += BtnMenu_Click;
+		bar.BtnWebToggle.Click += BtnWebToggle_Click;
+		bar.MouseEnter += delegate
+		{
+			LogDebug("control bar MouseEnter");
+			_hideTimer?.Stop();
+		};
+		bar.MouseLeave += delegate
+		{
+			LogDebug("control bar MouseLeave -> HideControlBar");
+			HideControlBar();
+		};
+		return bar;
+	}
+
+	private void Overlay_MouseDown(object sender, MouseButtonEventArgs e)
+	{
+		if (e.ChangedButton != 0 || e.ButtonState != MouseButtonState.Pressed)
+		{
+			return;
+		}
+		GetCursorPos(out var pt);
+		System.Windows.Point point = new System.Windows.Point(pt.X, pt.Y);
+		ResizeEdge resizeEdge = GetResizeEdge(e.GetPosition(_overlay));
+		if (resizeEdge != 0)
+		{
+			_isResizing = true;
+			_resizeEdge = (int)resizeEdge;
+			_resizeStartScreenMouse = point;
+			_resizeStartBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+			if (_isMaximized)
+			{
+				base.Left = _normalBounds.Left;
+				base.Top = _normalBounds.Top;
+				base.Width = _normalBounds.Width;
+				base.Height = _normalBounds.Height;
+				_resizeStartBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+				_isMaximized = false;
+				_controlBar.SetMaximizeIcon(isMaximized: false);
+			}
+			LogDebug($"overlay MouseDown (resize start) edge={resizeEdge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
+		}
+		else
+		{
+			_isDragging = true;
+			_dragStartScreenMouse = point;
+			_dragStartPos = new System.Windows.Point(base.Left, base.Top);
+			LogDebug($"overlay MouseDown (drag start) main=({base.Left},{base.Top})");
+		}
+		_overlay.CaptureMouse();
+	}
+
+	private void Overlay_MouseMove(object sender, MouseEventArgs e)
+	{
+		if (_isResizing)
+		{
+			(double, double) resizeDeltaDip = GetResizeDeltaDip();
+			ApplyResize(resizeDeltaDip.Item1, resizeDeltaDip.Item2);
+			return;
+		}
+		if (!_isDragging)
+		{
+			_overlay.Cursor = GetResizeCursor(GetResizeEdge(e.GetPosition(_overlay)));
+			if (!_isWebMode)
+			{
+				ShowControlBar();
+			}
+			return;
+		}
+		GetCursorPos(out var pt);
+		HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+		double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+		double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+		base.Left = _dragStartPos.X + ((double)pt.X - _dragStartScreenMouse.X) / num;
+		base.Top = _dragStartPos.Y + ((double)pt.Y - _dragStartScreenMouse.Y) / num2;
+		_overlay.Left = base.Left;
+		_overlay.Top = base.Top;
+		PositionControlBar();
+		PositionWebModeButtonWindow();
+	}
+
+	private void Overlay_MouseUp(object sender, MouseButtonEventArgs e)
+	{
+		if (_isResizing)
+		{
+			LogDebug($"overlay MouseUp (resize end) bounds=({base.Left},{base.Top},{base.Width:F0}x{base.Height:F0})");
+		}
+		_isDragging = false;
+		_isResizing = false;
+		_resizeEdge = 0;
+		_overlay.ReleaseMouseCapture();
+		GetCursorPos(out var up);
+		HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(_overlay);
+		double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+		double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+		double num3 = (double)up.X / num;
+		double num4 = (double)up.Y / num2;
+		if (num3 >= base.Left && num3 <= base.Left + base.Width && num4 >= base.Top && num4 <= base.Top + base.Height)
+		{
+			double num5 = num4 - base.Top;
+			double num6 = base.Top + base.Height - num4;
+			double num7 = num3 - base.Left;
+			double val = base.Left + base.Width - num3;
+			double num8 = Math.Min(Math.Min(num5, num6), Math.Min(num7, val));
+			int outX = up.X;
+			int outY = up.Y;
+			if (num8 == num5)
+			{
+				outY = (int)Math.Round(base.Top - 16.0 * num2);
+			}
+			else if (num8 == num6)
+			{
+				outY = (int)Math.Round(base.Top + base.Height + 16.0 * num2);
+			}
+			else if (num8 == num7)
+			{
+				outX = (int)Math.Round(base.Left - 16.0 * num);
+			}
+			else
+			{
+				outX = (int)Math.Round(base.Left + base.Width + 16.0 * num);
+			}
+			base.Dispatcher.BeginInvoke((Action)delegate
+			{
+				SetCursorPos(outX, outY);
+				SetCursorPos(up.X, up.Y);
+			}, DispatcherPriority.Input);
+		}
+		else
+		{
+			int insideX;
+			int insideY;
+			if (num4 < base.Top)
+			{
+				insideX = (int)Math.Round(base.Left + 24.0 * num);
+				insideY = (int)Math.Round(base.Top + 24.0 * num2);
+			}
+			else if (num4 > base.Top + base.Height)
+			{
+				insideX = (int)Math.Round(base.Left + 24.0 * num);
+				insideY = (int)Math.Round(base.Top + base.Height - 24.0 * num2);
+			}
+			else if (num3 < base.Left)
+			{
+				insideX = (int)Math.Round(base.Left + 24.0 * num);
+				insideY = up.Y;
+			}
+			else
+			{
+				insideX = (int)Math.Round(base.Left + base.Width - 24.0 * num);
+				insideY = up.Y;
+			}
+			base.Dispatcher.BeginInvoke((Action)delegate
+			{
+				SetCursorPos(insideX, insideY);
+				SetCursorPos(up.X, up.Y);
+			}, DispatcherPriority.Input);
+		}
+	}
+
+	private ResizeEdge GetResizeEdge(System.Windows.Point p)
+	{
+		ResizeEdge resizeEdge = ResizeEdge.None;
+		if (p.X <= 8.0)
+		{
+			resizeEdge |= ResizeEdge.Left;
+		}
+		else if (p.X >= base.Width - 8.0)
+		{
+			resizeEdge |= ResizeEdge.Right;
+		}
+		if (p.Y <= 8.0)
+		{
+			resizeEdge |= ResizeEdge.Top;
+		}
+		else if (p.Y >= base.Height - 8.0)
+		{
+			resizeEdge |= ResizeEdge.Bottom;
+		}
+		return resizeEdge;
+	}
+
+	private static Cursor GetResizeCursor(ResizeEdge edge)
+	{
+		bool flag = (edge & ResizeEdge.Left) != 0;
+		bool flag2 = (edge & ResizeEdge.Right) != 0;
+		bool flag3 = (edge & ResizeEdge.Top) != 0;
+		bool flag4 = (edge & ResizeEdge.Bottom) != 0;
+		if ((flag && flag3) || (flag2 && flag4))
+		{
+			return Cursors.SizeNWSE;
+		}
+		if ((flag2 && flag3) || (flag && flag4))
+		{
+			return Cursors.SizeNESW;
+		}
+		if (flag || flag2)
+		{
+			return Cursors.SizeWE;
+		}
+		if (flag3 || flag4)
+		{
+			return Cursors.SizeNS;
+		}
+		return Cursors.Arrow;
+	}
+
+	private void ApplyResize(double dx, double dy)
+	{
+		double left = _resizeStartBounds.Left;
+		double top = _resizeStartBounds.Top;
+		double num = _resizeStartBounds.Width;
+		double num2 = _resizeStartBounds.Height;
+		if ((_resizeEdge & 1) != 0)
+		{
+			num = Math.Max(400.0, _resizeStartBounds.Width - dx);
+			left = _resizeStartBounds.Right - num;
+		}
+		if ((_resizeEdge & 2) != 0)
+		{
+			num = Math.Max(400.0, _resizeStartBounds.Width + dx);
+		}
+		if ((_resizeEdge & 4) != 0)
+		{
+			num2 = Math.Max(300.0, _resizeStartBounds.Height - dy);
+			top = _resizeStartBounds.Bottom - num2;
+		}
+		if ((_resizeEdge & 8) != 0)
+		{
+			num2 = Math.Max(300.0, _resizeStartBounds.Height + dy);
+		}
+		base.Left = left;
+		base.Top = top;
+		base.Width = num;
+		base.Height = num2;
+		if (_isWebMode)
+		{
+			PositionResizeBands();
+			PositionWebModeButtonWindow();
+		}
+	}
+
+	private (double dx, double dy) GetResizeDeltaDip()
+	{
+		GetCursorPos(out var pt);
+		HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+		double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+		double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+		return (dx: ((double)pt.X - _resizeStartScreenMouse.X) / num, dy: ((double)pt.Y - _resizeStartScreenMouse.Y) / num2);
+	}
+
+	private void ShowOverlay()
+	{
+		_overlay.Show();
+		PinOverlayBelowMain();
+		UpdateFloatingWindows();
+		SetFocus(new WindowInteropHelper(this).Handle);
+		LogOverlayZOrder();
+	}
+
+	private void LogOverlayZOrder()
+	{
+		try
+		{
+			nint num = new WindowInteropHelper(_overlay).EnsureHandle();
+			nint num2 = new WindowInteropHelper(this).EnsureHandle();
+			if (num == IntPtr.Zero || num2 == IntPtr.Zero)
+			{
+				LogDebug($"Z-order: overlayHwnd={num} mainHwnd={num2} (null が存在)");
+				return;
+			}
+			GetWindowRect(num, out var lpRect);
+			GetWindowRect(num2, out var lpRect2);
+			LogDebug($"Z-order: overlay=0x{((IntPtr)num).ToInt64():X} ex=0x{GetWindowLong(num, -20):X} rect=({lpRect.Left},{lpRect.Top})-({lpRect.Right},{lpRect.Bottom}) visible={_overlay.Visibility}");
+			LogDebug($"Z-order: main=0x{((IntPtr)num2).ToInt64():X} ex=0x{GetWindowLong(num2, -20):X} rect=({lpRect2.Left},{lpRect2.Top})-({lpRect2.Right},{lpRect2.Bottom})");
+			nint num3 = GetTopWindow(IntPtr.Zero);
+			int num4 = 0;
+			while (num3 != IntPtr.Zero && num4 < 50)
+			{
+				if (num3 == num2)
+				{
+					LogDebug($"Z-order: main は top-level #{num4}");
+					break;
+				}
+				if (num3 == num)
+				{
+					LogDebug($"Z-order: overlay は top-level #{num4}");
+				}
+				num3 = GetWindow(num3, 2u);
+				num4++;
+			}
+		}
+		catch (Exception ex)
+		{
+			LogDebug("Z-order 診断失敗: " + ex.Message);
+		}
+	}
+
+	private Window[] CreateResizeBands()
+	{
+		SolidColorBrush background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(1, 0, 0, 0));
+		ResizeEdge[] array = new ResizeEdge[4]
+		{
+			ResizeEdge.Top,
+			ResizeEdge.Bottom,
+			ResizeEdge.Left,
+			ResizeEdge.Right
+		};
+		Window[] array2 = new Window[4];
+		for (int i = 0; i < 4; i++)
+		{
+			ResizeEdge edge = array[i];
+			Window band = new Window
+			{
+				WindowStyle = WindowStyle.None,
+				AllowsTransparency = true,
+				Background = background,
+				Content = new Border
+				{
+					Background = background
+				},
+				Topmost = true,
+				ShowInTaskbar = false,
+				ResizeMode = ResizeMode.NoResize,
+				Cursor = ((edge == ResizeEdge.Left || edge == ResizeEdge.Right) ? Cursors.SizeWE : Cursors.SizeNS)
+			};
+			Window captured = band;
+			band.Loaded += delegate
+			{
+				nint hWnd = new WindowInteropHelper(band).EnsureHandle();
+				int windowLong = GetWindowLong(hWnd, -20);
+				SetWindowLong(hWnd, -20, windowLong | 0x8000000);
+			};
+			band.MouseDown += delegate(object s, MouseButtonEventArgs e)
+			{
+				Band_MouseDown(captured, e);
+			};
+			band.MouseMove += delegate
+			{
+				UpdateBandCursor(captured, edge);
+				Band_MouseMove();
+			};
+			band.MouseUp += delegate(object s, MouseButtonEventArgs e)
+			{
+				Band_MouseUp(captured, e);
+			};
+			array2[i] = band;
+		}
+		return array2;
+	}
+
+	private void ShowResizeBands()
+	{
+		PositionResizeBands();
+		Window[] resizeBands = _resizeBands;
+		foreach (Window window in resizeBands)
+		{
+			if (!window.IsVisible)
+			{
+				window.Show();
+			}
+		}
+		nint hWndInsertAfter = ((_webModeButtonWindow != null) ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle() : new WindowInteropHelper(this).EnsureHandle());
+		Window[] resizeBands2 = _resizeBands;
+		foreach (Window window2 in resizeBands2)
+		{
+			SetWindowPos(new WindowInteropHelper(window2).EnsureHandle(), hWndInsertAfter, 0, 0, 0, 0, 19u);
+		}
+		LogResizeBands();
+	}
+
+	private void LogResizeBands()
+	{
+		try
+		{
+			string[] array = new string[4] { "top", "bottom", "left", "right" };
+			for (int i = 0; i < _resizeBands.Length; i++)
+			{
+				Window window = _resizeBands[i];
+				nint hWnd = new WindowInteropHelper(window).EnsureHandle();
+				GetWindowRect(hWnd, out var lpRect);
+				LogDebug($"[band] {array[i]}=0x{((IntPtr)hWnd).ToInt64():X} visible={window.IsVisible} rect=({lpRect.Left},{lpRect.Top})-({lpRect.Right},{lpRect.Bottom})");
+			}
+		}
+		catch (Exception ex)
+		{
+			LogDebug("[band] 診断失敗: " + ex.Message);
+		}
+	}
+
+	private void PositionResizeBands()
+	{
+		if (_isWebMode)
+		{
+			double width = base.Width;
+			double height = base.Height;
+			_resizeBands[0].Width = width;
+			_resizeBands[0].Height = 8.0;
+			_resizeBands[0].Left = base.Left;
+			_resizeBands[0].Top = base.Top;
+			_resizeBands[1].Width = width;
+			_resizeBands[1].Height = 8.0;
+			_resizeBands[1].Left = base.Left;
+			_resizeBands[1].Top = base.Top + height - 8.0;
+			_resizeBands[2].Width = 8.0;
+			_resizeBands[2].Height = height;
+			_resizeBands[2].Left = base.Left;
+			_resizeBands[2].Top = base.Top;
+			_resizeBands[3].Width = 8.0;
+			_resizeBands[3].Height = height;
+			_resizeBands[3].Left = base.Left + width - 8.0;
+			_resizeBands[3].Top = base.Top;
+		}
+	}
+
+	private void Band_MouseDown(Window band, MouseButtonEventArgs e)
+	{
+		if (e.ChangedButton == MouseButton.Left && e.ButtonState == MouseButtonState.Pressed)
+		{
+			GetCursorPos(out var pt);
+			HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+			double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+			double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+			ResizeEdge resizeEdge = GetResizeEdge(new System.Windows.Point((double)pt.X / num - base.Left, (double)pt.Y / num2 - base.Top));
+			_isResizing = true;
+			_resizeEdge = (int)resizeEdge;
+			_resizeStartScreenMouse = new System.Windows.Point(pt.X, pt.Y);
+			_resizeStartBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+			if (_isMaximized)
+			{
+				base.Left = _normalBounds.Left;
+				base.Top = _normalBounds.Top;
+				base.Width = _normalBounds.Width;
+				base.Height = _normalBounds.Height;
+				_resizeStartBounds = new Rect(base.Left, base.Top, base.Width, base.Height);
+				_isMaximized = false;
+				_controlBar.SetMaximizeIcon(isMaximized: false);
+			}
+			LogDebug($"band MouseDown (resize start) edge={resizeEdge} bounds=({_resizeStartBounds.Left},{_resizeStartBounds.Top},{_resizeStartBounds.Width:F0}x{_resizeStartBounds.Height:F0})");
+			band.CaptureMouse();
+		}
+	}
+
+	private void UpdateBandCursor(Window band, ResizeEdge captured)
+	{
+		if (!_isResizing)
+		{
+			GetCursorPos(out var pt);
+			HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+			double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+			double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+			double num3 = (double)pt.X / num;
+			double num4 = (double)pt.Y / num2;
+			bool flag = (captured & ResizeEdge.Left) != 0;
+			bool flag2 = (captured & ResizeEdge.Right) != 0;
+			bool flag3 = (captured & ResizeEdge.Top) != 0;
+			bool flag4 = (captured & ResizeEdge.Bottom) != 0;
+			bool flag5 = false;
+			if (flag && flag3)
+			{
+				flag5 = num3 <= base.Left + 16.0 && num4 <= base.Top + 16.0;
+			}
+			else if (flag2 && flag3)
+			{
+				flag5 = num3 >= base.Left + base.Width - 16.0 && num4 <= base.Top + 16.0;
+			}
+			else if (flag && flag4)
+			{
+				flag5 = num3 <= base.Left + 16.0 && num4 >= base.Top + base.Height - 16.0;
+			}
+			else if (flag2 && flag4)
+			{
+				flag5 = num3 >= base.Left + base.Width - 16.0 && num4 >= base.Top + base.Height - 16.0;
+			}
+			Cursor cursor2 = (band.Cursor = ((!flag5) ? ((flag || flag2) ? Cursors.SizeWE : Cursors.SizeNS) : (((flag && flag3) || (flag2 && flag4)) ? Cursors.SizeNWSE : Cursors.SizeNESW)));
+			if (band.Content is FrameworkElement frameworkElement)
+			{
+				frameworkElement.Cursor = cursor2;
+			}
+		}
+	}
+
+	private void Band_MouseMove()
+	{
+		if (_isResizing)
+		{
+			(double, double) resizeDeltaDip = GetResizeDeltaDip();
+			ApplyResize(resizeDeltaDip.Item1, resizeDeltaDip.Item2);
+		}
+	}
+
+	private void Band_MouseUp(Window band, MouseButtonEventArgs e)
+	{
+		LogDebug($"band MouseUp (resize end) bounds=({base.Left},{base.Top},{base.Width:F0}x{base.Height:F0})");
+		_isResizing = false;
+		_resizeEdge = 0;
+		band.ReleaseMouseCapture();
+	}
+
+	[DllImport("user32.dll")]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool GetCursorPos(out POINT pt);
+
+	[DllImport("user32.dll")]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool SetCursorPos(int X, int Y);
+
+	[DllImport("user32.dll")]
+	private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
+
+	[DllImport("user32.dll")]
+	private static extern nint GetTopWindow(nint hWnd);
+
+	[DllImport("user32.dll")]
+	private static extern nint GetWindow(nint hWnd, uint uCmd);
+
+	private static void BringToFront(nint hwnd)
+	{
+		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, 19u);
+	}
+
+	private nint OnMainWindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
+	{
+		if (msg != 132)
+		{
+			return IntPtr.Zero;
+		}
+		if (_hitTestLogCount < 10)
+		{
+			_hitTestLogCount++;
+			LogDebug($"WM_NCHITTEST hwnd=0x{((IntPtr)hwnd).ToInt64():X} hit={((IntPtr)wParam).ToInt32()} webMode={_isWebMode} (#{_hitTestLogCount})");
+		}
+		if (!_isWebMode)
+		{
+			handled = true;
+			return new IntPtr(-1);
+		}
+		return IntPtr.Zero;
+	}
+
+	private void PinOverlayBelowMain()
+	{
+		SetWindowPos(new WindowInteropHelper(_overlay).EnsureHandle(), new WindowInteropHelper(this).EnsureHandle(), 0, 0, 0, 0, 19u);
+	}
+
+	[DllImport("user32.dll")]
+	private static extern bool SetFocus(nint hWnd);
+
+	[DllImport("user32.dll")]
+	private static extern int GetSystemMetrics(int nIndex);
+
+	private void SetMainHitTestTransparent(bool transparent)
+	{
+		try
+		{
+			nint handle = new WindowInteropHelper(this).Handle;
+			int windowLong = GetWindowLong(handle, -20);
+			windowLong = ((!transparent) ? (windowLong & -33) : (windowLong | 0x20));
+			SetWindowLong(handle, -20, windowLong);
+			SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, 55u);
+			LogDebug($"Main WS_EX_TRANSPARENT = {transparent} (ex=0x{windowLong:X})");
+		}
+		catch (Exception ex)
+		{
+			LogDebug("SetMainHitTestTransparent error: " + ex.Message);
+		}
+	}
+
+	private void UpdateFloatingWindows()
+	{
+		if (!double.IsNaN(base.Left) && !double.IsNaN(base.Top))
+		{
+			_overlay.Left = base.Left;
+			_overlay.Top = base.Top;
+			_overlay.Width = base.Width;
+			_overlay.Height = base.Height;
+			PositionControlBar();
+			PositionWebModeButtonWindow();
+			PositionResizeBands();
+		}
+	}
+
+	private void PositionControlBar()
+	{
+		ControlBarWindow controlBar = _controlBar;
+		if (controlBar != null && controlBar.Visibility == Visibility.Visible)
+		{
+			_controlBar.Left = base.Left + base.Width - _controlBar.Width - 8.0;
+			_controlBar.Top = base.Top + 8.0;
+		}
+	}
+
+	private void ShowWebModeButtonWindow()
+	{
+		if (_webModeButtonWindow == null)
+		{
+			Button button = new Button
+			{
+				Width = 46.0,
+				Height = 32.0,
+				Cursor = Cursors.Hand,
+				ToolTip = "ウィンドウ操作に戻る",
+				Template = CreateReturnButtonTemplate(),
+				Content = new Viewbox
+				{
+					Width = 20.0,
+					Height = 16.0,
+					Child = new System.Windows.Shapes.Path
+					{
+						Data = Geometry.Parse("M 0.75,0.75 L 20.75,0.75 L 20.75,16.75 L 0.75,16.75 Z M 0.75,6.75 L 20.75,6.75"),
+						Width = 21.5,
+						Height = 17.5,
+						Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(68, 68, 68)),
+						StrokeThickness = 1.5,
+						Fill = System.Windows.Media.Brushes.Transparent,
+						SnapsToDevicePixels = true
+					}
+				}
+			};
+			button.Click += delegate
+			{
+				SetWebMode(webMode: false);
+			};
+			TextBlock element = new TextBlock
+			{
+				Text = "クリックで戻ります",
+				Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(68, 68, 68)),
+				VerticalAlignment = VerticalAlignment.Center,
+				Margin = new Thickness(10.0, 0.0, 8.0, 0.0)
+			};
+			StackPanel stackPanel = new StackPanel
+			{
+				Orientation = Orientation.Horizontal
+			};
+			stackPanel.Children.Add(button);
+			stackPanel.Children.Add(element);
+			_webModeButtonWindow = new Window
+			{
+				WindowStyle = WindowStyle.None,
+				AllowsTransparency = true,
+				Background = System.Windows.Media.Brushes.Transparent,
+				Topmost = true,
+				ShowInTaskbar = false,
+				Width = 230.0,
+				Height = 32.0,
+				Content = new Border
+				{
+					CornerRadius = new CornerRadius(8.0),
+					Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(153, byte.MaxValue, byte.MaxValue, byte.MaxValue)),
+					Child = stackPanel
+				}
+			};
+		}
+		_webModeButtonWindow.Left = base.Left + base.Width - _webModeButtonWindow.Width - 8.0;
+		_webModeButtonWindow.Top = base.Top + 8.0;
+		_webModeButtonWindow.Show();
+		_webModeButtonWindow.Activate();
+		LogWebModeButtonState("after Show/Activate");
+		base.Dispatcher.BeginInvoke((Action)delegate
+		{
+			LogWebModeButtonState("after dispatcher idle");
+		}, DispatcherPriority.ApplicationIdle);
+		StartWebModePinTimer();
+	}
+
+	private void StartWebModePinTimer()
+	{
+		if (_webModePinTimer == null)
+		{
+			_webModePinTimer = new DispatcherTimer
+			{
+				Interval = TimeSpan.FromMilliseconds(400L, 0L)
+			};
+			_webModePinTimer.Tick += delegate
+			{
+				PinWebModeButtonAboveMain();
+			};
+		}
+		_webModePinTimer.Start();
+	}
+
+	private void StopWebModePinTimer()
+	{
+		_webModePinTimer?.Stop();
+	}
+
+	private void PinWebModeButtonAboveMain()
+	{
+		if (!_isWebMode)
+		{
+			return;
+		}
+		try
+		{
+			nint num = ((_webModeButtonWindow != null) ? new WindowInteropHelper(_webModeButtonWindow).EnsureHandle() : IntPtr.Zero);
+			nint num2 = new WindowInteropHelper(this).EnsureHandle();
+			HashSet<nint> hashSet = new HashSet<nint>();
+			nint num3 = GetTopWindow(IntPtr.Zero);
+			int num4 = 0;
+			while (num3 != IntPtr.Zero && num4 < 200 && num3 != num2)
+			{
+				hashSet.Add(num3);
+				num3 = GetWindow(num3, 2u);
+				num4++;
+			}
+			bool flag = false;
+			Window webModeButtonWindow = _webModeButtonWindow;
+			if (webModeButtonWindow != null && webModeButtonWindow.IsVisible && !hashSet.Contains(num))
+			{
+				flag = true;
+			}
+			Window[] resizeBands = _resizeBands;
+			foreach (Window window in resizeBands)
+			{
+				if (window.IsVisible && !hashSet.Contains(new WindowInteropHelper(window).EnsureHandle()))
+				{
+					flag = true;
+					break;
+				}
+			}
+			if (!flag)
+			{
+				return;
+			}
+			LogDebug("[webmode-btn] z-order violation detected -> re-pinning (button>bands>main)");
+			SetWindowPos(num2, IntPtr.Zero, 0, 0, 0, 0, 19u);
+			Window[] resizeBands2 = _resizeBands;
+			foreach (Window window2 in resizeBands2)
+			{
+				if (window2.IsVisible)
+				{
+					BringToFront(new WindowInteropHelper(window2).EnsureHandle());
+				}
+			}
+			webModeButtonWindow = _webModeButtonWindow;
+			if (webModeButtonWindow != null && webModeButtonWindow.IsVisible)
+			{
+				BringToFront(num);
+			}
+		}
+		catch
+		{
+		}
+	}
+
+	private void LogWebModeButtonState(string when)
+	{
+		try
+		{
+			if (_webModeButtonWindow == null)
+			{
+				return;
+			}
+			nint num = new WindowInteropHelper(_webModeButtonWindow).EnsureHandle();
+			nint num2 = new WindowInteropHelper(this).EnsureHandle();
+			GetWindowRect(num, out var lpRect);
+			GetWindowRect(num2, out var lpRect2);
+			int value = -1;
+			nint num3 = GetTopWindow(IntPtr.Zero);
+			int num4 = 0;
+			while (num3 != IntPtr.Zero && num4 < 200)
+			{
+				if (num3 == num)
+				{
+					value = num4;
+					break;
+				}
+				if (num3 == num2)
+				{
+					break;
+				}
+				num3 = GetWindow(num3, 2u);
+				num4++;
+			}
+			LogDebug($"[webmode-btn] {when}: btn=0x{((IntPtr)num).ToInt64():X} visible={_webModeButtonWindow.IsVisible} rect=({lpRect.Left},{lpRect.Top})-({lpRect.Right},{lpRect.Bottom}) mainRect=({lpRect2.Left},{lpRect2.Top})-({lpRect2.Right},{lpRect2.Bottom}) zIdx={value} (mainに先着=-1でボタンがmainの下)");
+		}
+		catch (Exception ex)
+		{
+			LogDebug("[webmode-btn] 診断失敗: " + ex.Message);
+		}
+	}
+
+	private void HideWebModeButtonWindow()
+	{
+		_webModeButtonWindow?.Hide();
+	}
+
+	private void PositionWebModeButtonWindow()
+	{
+		if (_webModeButtonWindow != null && _webModeButtonWindow.Visibility == Visibility.Visible)
+		{
+			_webModeButtonWindow.Left = base.Left + base.Width - _webModeButtonWindow.Width - 8.0;
+			_webModeButtonWindow.Top = base.Top + 8.0;
+		}
+	}
+
+	private static ControlTemplate CreateReturnButtonTemplate()
+	{
+		FrameworkElementFactory frameworkElementFactory = new FrameworkElementFactory(typeof(Border));
+		frameworkElementFactory.Name = "BtnBorder";
+		frameworkElementFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(6.0));
+		frameworkElementFactory.SetValue(Border.BackgroundProperty, System.Windows.Media.Brushes.Transparent);
+		FrameworkElementFactory frameworkElementFactory2 = new FrameworkElementFactory(typeof(ContentPresenter));
+		frameworkElementFactory2.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+		frameworkElementFactory2.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+		frameworkElementFactory.AppendChild(frameworkElementFactory2);
+		Trigger trigger = new Trigger
+		{
+			Property = UIElement.IsMouseOverProperty,
+			Value = true
+		};
+		trigger.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(System.Windows.Media.Color.FromArgb(64, 0, 0, 0)), "BtnBorder"));
+		ControlTemplate controlTemplate = new ControlTemplate(typeof(Button))
+		{
+			VisualTree = frameworkElementFactory
+		};
+		controlTemplate.Triggers.Add(trigger);
+		return controlTemplate;
+	}
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern int GetWindowLong(nint hWnd, int nIndex);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
+
+	[DllImport("user32.dll")]
+	private static extern bool EnumChildWindows(nint hWndParent, EnumChildProc lpEnumFunc, nint lParam);
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+	private static extern int GetClassName(nint hWnd, StringBuilder lpClassName, int nMaxCount);
+
+	private void LogWindowTree()
+	{
+		try
+		{
+			StringBuilder stringBuilder = new StringBuilder();
+			AppendWindowTree(new WindowInteropHelper(this).Handle, stringBuilder, "  ");
+			LogDebug("ウィンドウツリー:\n" + stringBuilder.ToString());
+		}
+		catch
+		{
+		}
+	}
+
+	private static void AppendWindowTree(nint parent, StringBuilder sb, string indent)
+	{
+		EnumChildWindows(parent, delegate(nint hWnd, nint _)
+		{
+			StringBuilder stringBuilder = new StringBuilder(256);
+			GetClassName(hWnd, stringBuilder, stringBuilder.Capacity);
+			int windowLong = GetWindowLong(hWnd, -20);
+			bool value = (windowLong & 0x20) != 0;
+			bool value2 = (windowLong & 0x8000000) != 0;
+			StringBuilder stringBuilder2 = sb;
+			StringBuilder.AppendInterpolatedStringHandler handler = new StringBuilder.AppendInterpolatedStringHandler(30, 5, stringBuilder2);
+			handler.AppendFormatted(indent);
+			handler.AppendLiteral("[");
+			handler.AppendFormatted(((IntPtr)hWnd).ToInt64(), "X");
+			handler.AppendLiteral("] \"");
+			handler.AppendFormatted(stringBuilder);
+			handler.AppendLiteral("\" TRANSPARENT=");
+			handler.AppendFormatted(value);
+			handler.AppendLiteral(" NOACTIVATE=");
+			handler.AppendFormatted(value2);
+			stringBuilder2.AppendLine(ref handler);
+			AppendWindowTree(hWnd, sb, indent + "  ");
+			return true;
+		}, IntPtr.Zero);
+	}
+
+	internal void ApplyOpacity(double opacity)
+	{
+		opacity = Math.Clamp(opacity, 0.2, 1.0);
+		_pageOpacity = opacity;
+		ApplyWebViewAlpha();
+		LogDebug("ApplyOpacity: webview alpha -> " + opacity.ToString("0.###", CultureInfo.InvariantCulture));
+	}
+
+	// WPF の Window.Opacity は WebView2（子HWND）に効かないため、
+	// WebView2 ホストウィンドウ（Chrome_WidgetWin_1）へ LWA_ALPHA を適用して
+	// ウィンドウ全体をデスクトップに対して半透明にする（WinForms の Form.Opacity と同じ機構）。
+	private void ApplyWebViewAlpha()
+	{
+		if (_webViewHostHwnd == 0)
+		{
+			return; // StartWebViewAlphaFinder が発見した時点で適用される
+		}
+		byte alpha = (byte)Math.Round(255.0 * _pageOpacity);
+		// WS_EX_LAYERED フラグ自体がリセットされている場合は再付与する
+		if ((GetWindowLong(_webViewHostHwnd, -20) & 0x80000) == 0)
+		{
+			SetWindowLong(_webViewHostHwnd, -20, GetWindowLong(_webViewHostHwnd, -20) | 0x80000);
+		}
+		bool ok = SetLayeredWindowAttributes(_webViewHostHwnd, 0, alpha, LWA_ALPHA);
+		if (!ok)
+		{
+			LogDebug("ApplyWebViewAlpha: SetLayeredWindowAttributes failed err=" + Marshal.GetLastWin32Error());
+		}
+	}
+
+	// WebView2 のホストHWND は初期化後に非同期で作られるため、タイマーでリトライして探索する。
+	// 発見後は Chromium がページ読み込み等でホストウィンドウの属性をリセットし得るため、
+	// ウォッチドッグで LWA_ALPHA を定期再適用する（1秒毎・Win32コール1回のみの負荷）。
+	private void StartWebViewAlphaFinder()
+	{
+		if (_webViewHostHwnd != 0)
+		{
+			StartAlphaWatchdog();
+			return;
+		}
+		DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+		timer.Tick += delegate
+		{
+			nint main = new WindowInteropHelper(this).Handle;
+			nint found = 0;
+			EnumChildProc proc = (h, _) =>
+			{
+				System.Text.StringBuilder sb = new System.Text.StringBuilder(256);
+				GetClassName(h, sb, 256);
+				if (sb.ToString() == "Chrome_WidgetWin_1")
+				{
+					found = h;
+					return false;
+				}
+				return true;
+			};
+			EnumChildWindows(main, proc, 0);
+			if (found != 0)
+			{
+				timer.Stop();
+				_webViewHostHwnd = found;
+				LogDebug("WebView2 host hwnd found: 0x" + found.ToInt64().ToString("X"));
+				ApplyWebViewAlpha();
+				StartAlphaWatchdog();
+			}
+		};
+		timer.Start();
+	}
+
+	private void StartAlphaWatchdog()
+	{
+		if (_alphaWatchdog != null)
+		{
+			return;
+		}
+		_alphaWatchdog = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+		_alphaWatchdog.Tick += delegate
+		{
+			ApplyWebViewAlpha();
+		};
+		_alphaWatchdog.Start();
+	}
+
+	[DllImport("user32.dll")]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool SetLayeredWindowAttributes(nint hWnd, uint crKey, byte bAlpha, uint dwFlags);
+
+	private const uint LWA_ALPHA = 2;
+
+
+	private void NavigateToUrl(string url)
+	{
+		try
+		{
+			if (Uri.TryCreate(url, UriKind.Absolute, out Uri result))
+			{
+				WebView.Source = result;
+				LogDebug("Navigate: " + url);
+			}
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show("URL の読み込みに失敗しました。\n" + ex.Message, "読み込みエラー", MessageBoxButton.OK, MessageBoxImage.Exclamation);
+		}
+	}
+
+	private static void LogDebug(string message)
+	{
+		try
+		{
+			Directory.CreateDirectory(SettingsDirectory);
+			File.AppendAllText(System.IO.Path.Combine(SettingsDirectory, "debug.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+		}
+		catch
+		{
+		}
+	}
+
+	private AppSettings? LoadSettings()
+	{
+		try
+		{
+			if (!File.Exists(SettingsPath))
+			{
+				return null;
+			}
+			string json = File.ReadAllText(SettingsPath);
+			JsonSerializerOptions options = new JsonSerializerOptions
+			{
+				PropertyNameCaseInsensitive = true
+			};
+			AppSettings appSettings = JsonSerializer.Deserialize<AppSettings>(json, options);
+			if (appSettings == null)
+			{
+				return null;
+			}
+			appSettings.Opacity = Math.Clamp(appSettings.Opacity, 0.2, 1.0);
+			return appSettings;
+		}
+		catch (Exception value)
+		{
+			LogDebug($"LoadSettingsエラー: {value}");
+			return null;
+		}
+	}
+
+	private void SaveSettings(string url, double opacity, Rect? windowBounds = null)
+	{
+		AppSettings appSettings = LoadSettings();
+		AppSettings value = new AppSettings
+		{
+			Url = url,
+			Opacity = Math.Clamp(opacity, 0.2, 1.0),
+			WindowBounds = (windowBounds.HasValue ? new WindowBounds(windowBounds.Value) : appSettings?.WindowBounds)
+		};
+		try
+		{
+			Directory.CreateDirectory(SettingsDirectory);
+			File.WriteAllText(SettingsPath, JsonSerializer.Serialize(value, new JsonSerializerOptions
+			{
+				WriteIndented = true
+			}));
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show("設定の保存に失敗しました。\n" + ex.Message, "保存エラー", MessageBoxButton.OK, MessageBoxImage.Hand);
+		}
+	}
+
+	private Rect GetVirtualScreenRect()
+	{
+		HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
+		double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+		double num2 = hwndSource?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+		return new Rect((double)GetSystemMetrics(76) / num, (double)GetSystemMetrics(77) / num2, (double)GetSystemMetrics(78) / num, (double)GetSystemMetrics(79) / num2);
+	}
+
+	private void RestoreWindowPosition(AppSettings? settings)
+	{
+		WindowBounds windowBounds = settings?.WindowBounds;
+		if (windowBounds != null && double.IsFinite(windowBounds.Left) && double.IsFinite(windowBounds.Top) && windowBounds.Width >= 400.0 && windowBounds.Height >= 300.0)
+		{
+			Rect rect = windowBounds.ToRect();
+			Rect rect2 = rect;
+			rect2.Intersect(GetVirtualScreenRect());
+			if (!rect2.IsEmpty)
+			{
+				base.Left = windowBounds.Left;
+				base.Top = windowBounds.Top;
+				base.Width = windowBounds.Width;
+				base.Height = windowBounds.Height;
+				LogDebug($"起動: 保存済み位置を復元 ({windowBounds.Left},{windowBounds.Top},{windowBounds.Width:F0}x{windowBounds.Height:F0})");
+				return;
+			}
+			LogDebug($"起動: 保存済み位置がオフスクリーン ({windowBounds.Left},{windowBounds.Top}) -> プライマリモニター中央へフォールバック");
+			base.Width = windowBounds.Width;
+			base.Height = windowBounds.Height;
+		}
+		Rect workArea = SystemParameters.WorkArea;
+		base.Left = workArea.Left + (workArea.Width - base.Width) / 2.0;
+		base.Top = workArea.Top + (workArea.Height - base.Height) / 2.0;
+	}
+
+	private void OnWindowClosing(object? sender, CancelEventArgs e)
+	{
+		Rect value = (_isMaximized ? _normalBounds : new Rect(base.Left, base.Top, base.Width, base.Height));
+		LogDebug($"終了: 位置・サイズを保存 ({value.Left},{value.Top},{value.Width:F0}x{value.Height:F0})");
+		SaveSettings(_currentUrl, _pageOpacity, value);
+	}
+
+
 }

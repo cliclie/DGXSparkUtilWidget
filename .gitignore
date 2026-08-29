@@ -5,3 +5,10 @@ obj/
 ## IDE / tooling
 .vs/
 *.user
+
+## Scratch / diagnostic artifacts (local only, not for commit)
+tools/_*/
+tools/_*.ps1
+tools/_*.cs
+tools/*.log
+tools/*.png

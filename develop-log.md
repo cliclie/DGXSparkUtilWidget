@@ -413,3 +413,42 @@ tools/
 ### 既知の残タスク
 - 実マウスでの最終確認: **未実施**（次回起動時に「前回終了時の位置・サイズで表示されること」「サブモニターを外した状況で起動するとプライマリモニター中央に表示されること」を確認）
 
+---
+
+## 18. ウィンドウ全体透過（WebView2 領域含む）— WebView2 ホストHWND への LWA_ALPHA 適用（2026-08-29）
+
+### 要件
+1. メインウィンドウの透過率が設定ダイアログのスライダー指定値に追従すること（**WebView2 の表示領域を含む**）
+2. 再起動後も保存済み透過率で復元すること
+3. 設定ダイアログで URL 未入力のまま保存できるようにする（ユーザー依頼。空欄はナビゲーションしないだけ）
+
+### 調査結果（なぜこれまで透過できなかったか）
+- WPF の `Window.Opacity` はメイン HWND にのみ効き、WebView2 の子HWND（`Chrome_WidgetWin_0/1`、`Chrome_RenderWidgetHostHWND`）には無効 → Web 領域は常に不透明
+- WinForms 式（`Form.Opacity = 0.5` と同じ `SetLayeredWindowAttributes(LWA_ALPHA)`）を**メインウィンドウに適用する試みは不可能**: WPF ランタイム（`HwndTarget.WndProc`）を逆コンパイルして確認したところ、`AllowsTransparency` を持たないウィンドウでは GWL_EXSTYLE 変更時に WM_STYLECHANGING ハンドラが **WS_EX_LAYERED を無条件にクリア**する（プロセス内の呼び出しも外部からの呼び出しもブロックされる）
+- `AllowsTransparency=True` + `WebView2.DefaultBackgroundColor=Transparent` + CSS `documentElement.style.opacity` の方式も**無効**（WebView2 サーフェスはネイティブ子HWND であり、WPF のピクセル単位 alpha 合成の対象外）
+- **実証実験で判明**: WebView2 のホストウィンドウ（`Chrome_WidgetWin_1`）にのみ LWA_ALPHA を適用すると期待通りのブレンドピクセルが即座に出る。WPF が守るのは自分の HWND だけなので、子ウィンドウへの適用は通る
+
+### 実装内容
+| # | ファイル | 変更 |
+|---|---|---|
+| 1 | `MainWindow.xaml` | `AllowsTransparency="True"` を復元し、WebView2 背後の WPF レイヤーを完全透明化（前提） |
+| 2 | `MainWindow.xaml.cs` | `ApplyOpacity()` を CSS opacity スクリプト方式から **`SetLayeredWindowAttributes(LWA_ALPHA)` への適用に変更**（適用先は `_webViewHostHwnd`）。ホストHWND は初期化後に非同期で作られるため、`StartWebViewAlphaFinder()` が 250ms リトライで `EnumChildWindows` 探索 |
+| 3 | `MainWindow.xaml.cs` | **1秒毎に LWA_ALPHA を再適用するウォッチドッグを追加**（Chromium がページ読み込み時にホストウィンドウの属性をリセットするため。WS_EX_LAYERED フラグが消えていれば再付与）。機能しなかった CSS opacity 機構（`ApplyPageOpacityScript` / DOMContentLoaded ハンドラ）は削除 |
+| 4 | `SettingsDialog.xaml.cs` | URL 空欄で保存可能に（空欄時はナビゲーションしない）。検証を「http/https のみ」→「非空なら任意の絶対 URI（`file://` 含む）」へ緩和。この http/https 限定が E2E テスト（ローカル file:// ページ使用）をブロックしていた |
+
+### テスト（`tools/test_opacity_e2e.ps1` 新規・全フェーズ OK）
+| フェーズ | 内容 | 結果 |
+|---|---|---|
+| A | 起動 op=1.0 → サンプル点が純赤 (255,0,0) | OK actual=(255,0,0) |
+| B | **設定スライダーでライブ変更 op=0.30** → 期待ブレンドピクセル（UIA でダイアログのスライダー操作＋保存） | OK actual=(132,64,74) expected~(133,64,75) |
+| C | 再起動して保存値 op=0.2 で復元 | OK actual=(115,73,85) expected~(116,74,86) |
+- テストページ `tools/opacity_test_page.html`（純赤背景）。期待値はサンプル点のデスクトップ基線色と合成計算で算出
+- 実 Web ページでの確認: **完了**（ユーザー「webページも表示したまま透過できるところまで確認しました」との報告）
+
+### 補足
+- `tools/` の診断用 scratch ファイル（`_*.ps1` / `_*.cs` / `*.png` / `*.log`）は `.gitignore` に除外パターンを追加し、リポジトリから除外した（ローカルには残置）
+- E2E テストは UIA で設定ダイアログを開くため、Web モード復帰時のホバー操作と干渉しない
+
+### 既知の残タスク
+- **Web 操作モードの不具合（新規）**: Web モードでマウス操作が WebView2 に届かず**背面のウィンドウに貫通する**（Web 切替が無効になったように見える）。透過率とは別の問題。`AllowsTransparency=True` 復元 / WS_EX_TRANSPARENT の付与・解除タイミングと hit test の相互作用が疑われるため、次回セッションで調査予定
+

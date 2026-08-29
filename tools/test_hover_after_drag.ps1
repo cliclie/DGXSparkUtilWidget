@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 test_hover_after_drag.ps1
 検証目的: ウィンドウをドラッグ移動した後に、ウィンドウ外に出ずに右上アイコン位置へホバーしたとき、
@@ -21,6 +21,17 @@ $log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
 
 Get-Process DGXSparkUtilWidget -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
+
+# テストはプライマリモニター上を前提にするため、保存された WindowBounds をクリアする（初回起動相当）
+$settingsPath = Join-Path $env:APPDATA "DGXSparkUtilWidget\settings.json"
+if (Test-Path $settingsPath) {
+    $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if ($cfg.PSObject.Properties.Name -contains 'WindowBounds') {
+        $cfg.PSObject.Properties.Remove('WindowBounds')
+        $cfg | ConvertTo-Json -Depth 5 | Set-Content $settingsPath -Encoding UTF8
+        Write-Host "cleared WindowBounds for test"
+    }
+}
 
 # P/Invoke ヘルパー（tools\Native.cs と同じ内容＋EnumWindows 等を1ブロックに統合）
 Add-Type -TypeDefinition @"
@@ -225,7 +236,12 @@ try {
 
     # ---- Phase D: 復帰確認（ウィンドウ外に出て再入場）----
     [void][Native]::SetCursorPos([int](($r2.Left + $r2.Right) / 2), ([int]$r2.Bottom + 150))
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds 1200   # 非表示シーケンス（300msタイマー+350msフェード）完了待ち
+    $winsOutside = [Native2]::GetAppWindows($script:p.Id)
+    $barWhileOutside = $null
+    foreach ($w in $winsOutside) { if (($w.Rect.Bottom - $w.Rect.Top) -le 40) { $barWhileOutside = $w; break } }
+    $hiddenOutsideOk = ($null -eq $barWhileOutside)
+    Write-Host ("PHASE D1: cursor outside, bar hidden={0} -> {1}" -f $hiddenOutsideOk, $(if ($hiddenOutsideOk) { "OK" } else { "NG (BUG: bar stays visible)" }))
     $resD = Show-BarAndMove $cC[0] $cC[1]
     $barD = $resD[0]; $hitD = Test-Hit $resD[1] $resD[2]
     $barVisibleD = ($null -ne $barD)

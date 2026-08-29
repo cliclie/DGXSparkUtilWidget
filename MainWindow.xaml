@@ -15,9 +15,12 @@
         Loaded="MainWindow_Loaded">
 
     <!-- ルートの角丸Border -->
+    <!-- 全体透過: WPF レイヤーは完全透明（AllowsTransparency のピクセル単位 alpha）にし、
+         WebView2 ホストウィンドウ（Chrome_WidgetWin_1）へ LWA_ALPHA を適用することで
+         WebView2 領域を含むウィンドウ全体がデスクトップに対してスライダー指定の透明度で透ける。 -->
     <Border x:Name="RootBorder"
             CornerRadius="10"
-            Background="#FF1E1E2E"
+            Background="Transparent"
             ClipToBounds="True"
             MouseLeftButtonDown="RootBorder_MouseLeftButtonDown"
             MouseEnter="RootBorder_MouseEnter"

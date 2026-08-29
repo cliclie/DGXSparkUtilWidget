@@ -52,30 +52,17 @@ namespace DGXSparkUtilWidget
 
         /// <summary>
         /// 保存ボタンのクリック処理。
-        /// URL を検証し、値を設定してダイアログを閉じる。
+        /// URL が空の場合は空のまま保存し、値を設定してダイアログを閉じる。
         /// </summary>
         private void BtnSave_Click(object sender, RoutedEventArgs e)
         {
             var url = TxtUrl.Text.Trim();
 
-            // URL が空でないか確認
-            if (string.IsNullOrWhiteSpace(url))
+            // 非空の場合のみ絶対 URI かチェック（http / https / file 等のスキームはすべて許可）
+            if (url.Length > 0 && !Uri.TryCreate(url, UriKind.Absolute, out _))
             {
                 MessageBox.Show(
-                    "接続先URLを入力してください。",
-                    "入力エラー",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning,
-                    MessageBoxResult.OK);
-                return;
-            }
-
-            // URL の形式を有効性チェック（http / https のみ許可）
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
-                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-            {
-                MessageBox.Show(
-                    "有効なURLを入力してください。\n（http:// または https:// で始まるURLを入力してください）",
+                    "有効なURLを入力してください。\n（http:// または https:// で始まるURL、または空欄にしてください）",
                     "入力エラー",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning,
