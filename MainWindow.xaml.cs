@@ -60,12 +60,10 @@ namespace DGXSparkUtilWidget
         {
             InitializeComponent();
 
-            // CenterScreen は起動時アクティブモニター基準になるため、上段モニターで起動した
-            // 際に上段モニター中央に表示されてしまい見えなくなることがある。
-            // プライマリモニター（タスクバー側）の作業領域中央に明示的に配置する。
-            var workArea = SystemParameters.WorkArea;
-            Left = workArea.Left + (workArea.Width - Width) / 2;
-            Top = workArea.Top + (workArea.Height - Height) / 2;
+            // 起動時は前回終了時の位置・サイズを復元する（オフスクリーンならプライマリモニター作業領域中央へフォールバック）
+            RestoreWindowPosition(LoadSettings());
+
+            Closing += OnWindowClosing;
 
             _normalBounds = new Rect(Left, Top, Width, Height);
 
@@ -974,6 +972,14 @@ namespace DGXSparkUtilWidget
         [DllImport("user32.dll")]
         private static extern bool SetFocus(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+
         private const uint SWP_FRAMECHANGED = 0x0020;
         private const uint SWP_NOZORDER = 0x0004;
 
@@ -1368,9 +1374,18 @@ namespace DGXSparkUtilWidget
             }
         }
 
-        private void SaveSettings(string url, double opacity)
+        private void SaveSettings(string url, double opacity, Rect? windowBounds = null)
         {
-            var settings = new AppSettings { Url = url, Opacity = Math.Clamp(opacity, 0.2, 1.0) };
+            // 既存設定をマージして保存する（WindowBounds を渡さなかった場合、既存値を保持する）
+            var existing = LoadSettings();
+            var settings = new AppSettings
+            {
+                Url = url,
+                Opacity = Math.Clamp(opacity, 0.2, 1.0),
+                WindowBounds = windowBounds is not null
+                    ? new WindowBounds(windowBounds.Value)
+                    : existing?.WindowBounds,
+            };
             try
             {
                 Directory.CreateDirectory(SettingsDirectory);
@@ -1393,6 +1408,80 @@ namespace DGXSparkUtilWidget
         {
             public string Url { get; set; } = string.Empty;
             public double Opacity { get; set; } = 1.0;
+            public WindowBounds? WindowBounds { get; set; }
+        }
+
+        /// <summary>ウィンドウの位置・サイズ（DIP）。settings.json に永続化する。</summary>
+        public sealed class WindowBounds
+        {
+            public double Left { get; set; }
+            public double Top { get; set; }
+            public double Width { get; set; }
+            public double Height { get; set; }
+
+            public WindowBounds() { }
+
+            public WindowBounds(Rect r)
+            {
+                Left = r.Left; Top = r.Top; Width = r.Width; Height = r.Height;
+            }
+
+            public Rect ToRect() => new(Left, Top, Width, Height);
+        }
+
+        /// <summary>仮想デスクトップ（全モニターの合成領域）を DIP 単位で取得する。</summary>
+        private Rect GetVirtualScreenRect()
+        {
+            var src = (HwndSource)PresentationSource.FromVisual(this);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            return new Rect(GetSystemMetrics(SM_XVIRTUALSCREEN) / sx, GetSystemMetrics(SM_YVIRTUALSCREEN) / sy,
+                            GetSystemMetrics(SM_CXVIRTUALSCREEN) / sx, GetSystemMetrics(SM_CYVIRTUALSCREEN) / sy);
+        }
+
+        /// <summary>
+        /// 起動時のウィンドウ位置・サイズを設定。前回終了時に保存した値を復元し、
+        /// その位置が現在の仮想デスクトップ（全モニターの合成領域）の外にある場合は
+        /// （例: サブモニターが外された）プライマリモニター作業領域中央へフォールバックする。
+        /// </summary>
+        private void RestoreWindowPosition(AppSettings? settings)
+        {
+            var saved = settings?.WindowBounds;
+            if (saved is not null
+                && double.IsFinite(saved.Left) && double.IsFinite(saved.Top)
+                && saved.Width >= ResizeMinWidth && saved.Height >= ResizeMinHeight)
+            {
+                var rect = saved.ToRect();
+                // 仮想デスクトップと交差すれば表示可能とみなす
+                var intersection = rect;
+                intersection.Intersect(GetVirtualScreenRect());
+                if (!intersection.IsEmpty)
+                {
+                    Left = saved.Left;
+                    Top = saved.Top;
+                    Width = saved.Width;
+                    Height = saved.Height;
+                    LogDebug($"起動: 保存済み位置を復元 ({saved.Left},{saved.Top},{saved.Width:F0}x{saved.Height:F0})");
+                    return;
+                }
+                LogDebug($"起動: 保存済み位置がオフスクリーン ({saved.Left},{saved.Top}) -> プライマリモニター中央へフォールバック");
+                // サイズは保存値を維持し、位置のみフォールバックする
+                Width = saved.Width;
+                Height = saved.Height;
+            }
+
+            // 初回起動またはオフスクリーン: プライマリモニター作業領域中央
+            var workArea = SystemParameters.WorkArea;
+            Left = workArea.Left + (workArea.Width - Width) / 2;
+            Top = workArea.Top + (workArea.Height - Height) / 2;
+        }
+
+        /// <summary>終了時にウィンドウの位置・サイズを設定へ保存する（最大化中は通常サイズの矩形を保存）。</summary>
+        private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+        {
+            var bounds = _isMaximized ? _normalBounds : new Rect(Left, Top, Width, Height);
+            LogDebug($"終了: 位置・サイズを保存 ({bounds.Left},{bounds.Top},{bounds.Width:F0}x{bounds.Height:F0})");
+            SaveSettings(_currentUrl, Opacity, bounds);
         }
     }
 }
