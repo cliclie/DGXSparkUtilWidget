@@ -173,8 +173,8 @@ try {
         $zB = Get-ZOrder $btn.Hwnd
         $zM = Get-ZOrder $mainHwnd
         $hit = Test-Hit $bx $by
-        $expX = [int]($rect.Left + 8 * $S); $expY = [int]($rect.Top + 8 * $S)
-        $posOk = ([math]::Abs($btn.Rect.Left - $expX) -le 4) -and ([math]::Abs($btn.Rect.Top - $expY) -le 4)
+        $expRight = [int]($rect.Right - 8 * $S); $expY = [int]($rect.Top + 8 * $S)
+        $posOk = ([math]::Abs($btn.Rect.Right - $expRight) -le 4) -and ([math]::Abs($btn.Rect.Top - $expY) -le 4)
         $verdict = if ($hit -eq $btn.Hwnd -and $zB -lt $zM) { "OK (visible, on top, clickable)" }
                    elseif ($hit -ne $btn.Hwnd)              { "BUG (hidden behind: hit=0x$(HwndHex $hit))" }
                    else                                     { "? unexpected" }

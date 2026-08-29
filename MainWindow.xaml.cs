@@ -30,6 +30,7 @@ namespace DGXSparkUtilWidget
         private bool _isMaximized;
         private Rect _normalBounds;
         private DispatcherTimer? _hideTimer;
+        private DispatcherTimer? _hoverWatchdog;
 
         // 独立した Topmost ウィンドウとして WebView2 のネイティブHWND 上に表示するため、
         // コントロールバー・入力遮断オーバーレイ・復帰ボタンはすべて別ウィンドウで実装する。
@@ -135,6 +136,7 @@ namespace DGXSparkUtilWidget
             // WebView2 初期化が完了する前に入力遮断オーバーレイを表示し、
             // 起動直後にマウス入力が Web 側へ届くのを防ぐ。
             SetWebMode(false);
+            StartHoverWatchdog();
 
             try
             {
@@ -266,6 +268,47 @@ namespace DGXSparkUtilWidget
             _hideTimer.Start();
         }
 
+        // ====================== ホバー watchdog（WPF ホバー追跡 stuck 対策）======================
+
+        /// <summary>
+        /// ドラッグ終了後の nudge リシンクは SetCursorPos（瞬間移動）でカーソルを外→内へ動かすが、
+        /// WM_MOUSELEAVE は物理的なマウス移動でのみ発生するため、WPF のホバー状態が「外にいる」
+        /// と誤認したまま固定され、以降の MouseEnter/MouseMove が発火しなくなるケースがある。
+        /// 250ms 間隔でカーソルの実位置をポーリングしてバーの表示/非表示を補正する（ウィンドウモードのみ）。
+        /// </summary>
+        private void StartHoverWatchdog()
+        {
+            if (_hoverWatchdog is not null) return;
+            _hoverWatchdog = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _hoverWatchdog.Tick += (_, _) => HoverWatchdogTick();
+            _hoverWatchdog.Start();
+        }
+
+        private void StopHoverWatchdog()
+        {
+            _hoverWatchdog?.Stop();
+        }
+
+        private void HoverWatchdogTick()
+        {
+            if (_isWebMode || double.IsNaN(Left)) return;
+            GetCursorPos(out POINT p);
+            var src = (HwndSource?)PresentationSource.FromVisual(this);
+            double sx = src?.CompositionTarget.TransformToDevice.M11 ?? 1.0;
+            double sy = src?.CompositionTarget.TransformToDevice.M22 ?? 1.0;
+            double mx = p.X / sx, my = p.Y / sy;
+            bool inside = mx >= Left && mx <= Left + Width && my >= Top && my <= Top + Height;
+            if (inside)
+            {
+                if (_controlBar.Visibility != Visibility.Visible) LogDebug("hover watchdog: cursor inside but bar hidden -> show");
+                ShowControlBar();
+            }
+            else
+            {
+                HideControlBar();
+            }
+        }
+
         private void BtnMinimize_Click(object sender, RoutedEventArgs e)
         {
             WindowState = WindowState.Minimized;
@@ -354,6 +397,7 @@ namespace DGXSparkUtilWidget
                 _overlay.Hide();
                 ShowResizeBands();
                 _hideTimer?.Stop();
+                StopHoverWatchdog();
                 _controlBar.Hide();
                 ShowWebModeButtonWindow();
                 SetMainHitTestTransparent(false); // メインウィンドウをヒットテスト可能に（Web が操作可能に）
@@ -367,6 +411,7 @@ namespace DGXSparkUtilWidget
                 foreach (var b in _resizeBands) b.Hide();
                 HideWebModeButtonWindow();
                 StopWebModePinTimer();
+                StartHoverWatchdog();
                 // Webモードから戻った直後は、操作した場所の近く（右上）にコントロールバーを即表示する
                 if (_wasWebMode) ShowControlBar();
                 SetMainHitTestTransparent(true); // メインウィンドウを OS レベルでヒットテスト不能に（Web 入力を遮断）
@@ -976,7 +1021,8 @@ namespace DGXSparkUtilWidget
         private void PositionControlBar()
         {
             if (_controlBar is not { Visibility: Visibility.Visible }) return;
-            _controlBar.Left = Left + 8;
+            // 復帰バーと同じ幅・位置（右上）に配置し、同じ位置で切り替わるようにする
+            _controlBar.Left = Left + Width - _controlBar.Width - 8;
             _controlBar.Top = Top + 8;
         }
 
@@ -1024,6 +1070,9 @@ namespace DGXSparkUtilWidget
                     Margin = new Thickness(10, 0, 8, 0),
                 };
 
+                // ボタンはバーの左端に配置する。復帰バーはコントロールバーと同一位置・同一幅のため、
+                // このボタンはウィンドウモードの WebToggle（先頭・左端）と完全に重なる位置になり、
+                // モード切替で同じ場所のまま「⚡ → 復帰ボタン＋ラベル」に切り替わるように見える。
                 var panel = new StackPanel { Orientation = Orientation.Horizontal };
                 panel.Children.Add(button);
                 panel.Children.Add(label);
@@ -1046,7 +1095,8 @@ namespace DGXSparkUtilWidget
                     },
                 };
             }
-            _webModeButtonWindow.Left = Left + 8;
+            // コントロールバーと同じ位置（右上・8pxオフセット）に配置する
+            _webModeButtonWindow.Left = Left + Width - _webModeButtonWindow.Width - 8;
             _webModeButtonWindow.Top = Top + 8;
             _webModeButtonWindow.Show();
             _webModeButtonWindow.Activate();
@@ -1155,8 +1205,8 @@ namespace DGXSparkUtilWidget
         private void PositionWebModeButtonWindow()
         {
             if (_webModeButtonWindow is null || _webModeButtonWindow.Visibility != Visibility.Visible) return;
-            // コントロールバーと同じ位置（左上・8pxオフセット）に追従させる
-            _webModeButtonWindow.Left = Left + 8;
+            // コントロールバーと同じ位置（右上・8pxオフセット）に追従させる
+            _webModeButtonWindow.Left = Left + Width - _webModeButtonWindow.Width - 8;
             _webModeButtonWindow.Top = Top + 8;
         }
 

@@ -181,9 +181,9 @@ try {
     $rh = Get-MainRect; $oh = Get-OvRect
     $dw2 = ($rh.Right - $rh.Left) - ($rg.Right - $rg.Left); $dh2 = ($rh.Bottom - $rh.Top) - ($rg.Bottom - $rg.Top)
     $followF = ([math]::Abs(($oh.Right-$oh.Left) - ($rh.Right-$rh.Left))) -lt 3
-    # 復帰バー（230x32・左上）が新しい左上に追従しているか
+    # 復帰バー（230x32・右上）が新しい右上に追従しているか
     $btn = [Native]::GetAppWindows($p.Id) | Where-Object { ($_.Rect.Bottom - $_.Rect.Top) -ge 28 -and ($_.Rect.Bottom - $_.Rect.Top) -le 40 } | Select-Object -First 1
-    $btnOk = ($null -ne $btn) -and ([math]::Abs($btn.Rect.Left - $rh.Left) -lt 30) -and ([math]::Abs($btn.Rect.Top - $rh.Top) -lt 30)
+    $btnOk = ($null -ne $btn) -and ([math]::Abs($btn.Rect.Right - $rh.Right) -lt 30) -and ([math]::Abs($btn.Rect.Top - $rh.Top) -lt 30)
     $verdictF = if (($dw2 -ge 60) -and ($dh2 -ge 45) -and $followF -and $btnOk) { "OK" } else { "NG" }
     Write-Host ("PHASE F: web-mode corner resize dW={0} dH={1}, overlay follows={2}, return button follows={3} -> {4}" -f `
         $dw2, $dh2, $followF, $btnOk, $verdictF)
