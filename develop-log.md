@@ -616,7 +616,8 @@ tools/
 - **修正ファイル:**
   - `MainWindow.xaml.cs`: `SettingsDirectory` を `AppDomain.CurrentDomain.BaseDirectory` に変更、`_debugMode` フラグ追加、`LogDebug()` 先頭にガード追加
   - `README.md`: 設定ファイルパス・デバッグログの記述を更新、「デバッグログ」セクション追加
-  - `tools/*.ps1` (17ファイル): テストスクリプト内の設定/ログパスを exe 直下へ更新
+  - `tools/*.ps1` (10ファイル): テストスクリプト内の設定/ログパスを exe 直下へ更新
+  - `tools/check_ts.ps1` / `tools/fix_comment.ps1`: 開発用ユーティリティスクリプトをリポジトリ管理下に追加
 
 - **動作確認:**
   - `dotnet build` 成功（0 errors）
