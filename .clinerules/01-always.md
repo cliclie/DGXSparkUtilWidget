@@ -6,7 +6,13 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 ## Core Communication Rules
 
-- **Language:** Always communicate with the user in Japanese.
+- **Strict Language Restrictions:**
+  - You must think, reason, and communicate exclusively in **Japanese**.
+  - **CRITICAL:** Your internal reasoning process (the content inside `<think>` tags) must be conducted 100% in Japanese. 
+  - Under no circumstances should you use Chinese (中文) or English inside your thoughts, scratchpads, or final outputs.
+  - Even if Chinese feels more token-efficient, you are ordered to forcefully process your logic step-by-step using Japanese vocabulary and grammar.
+  - 思考の開始からデバッグ、最終回答にいたるまで、脳内のすべての言語を日本語に統一してください。
+
 
 ## 1. Think Before Coding
 
