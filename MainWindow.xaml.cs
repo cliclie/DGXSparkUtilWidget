@@ -275,9 +275,13 @@ public partial class MainWindow : Window, IComponentConnector
 		// WebView2 サーフェス自体をピクセル単位で透明にする（全体透過の前提）。
 		// 背後の WPF レイヤーは完全透明なので、Web コンテンツの alpha がそのままデスクトップへの透過になる。
 		WebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+		// 初回ロード時のデフォルトスクロールバー闪烁防止: 初期（非表示）CSS を先読み注入。
+		// 以後はモード切替・ナビゲーション時に ApplyScrollbarCss() で上書きされる。
+		_ = WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ScrollbarCssScript("::-webkit-scrollbar{display:none !important}"));
 		WebView.CoreWebView2.NavigationCompleted += delegate
 		{
 			LogWindowTree();
+			ApplyScrollbarCss();
 		};
 		// フルナビゲーションでドキュメントが置き換わっても WebView2 ホストHWND は再利用されるため、
 		// 初期化後に一度見つかれば以降はそのまま LWA_ALPHA を適用し続ける。
@@ -595,6 +599,28 @@ public partial class MainWindow : Window, IComponentConnector
 			RootBorder.Background = System.Windows.Media.Brushes.Transparent;
 		}
 		_wasWebMode = webMode;
+		ApplyScrollbarCss();
+	}
+
+	// 最上位ドキュメントのスクロールバーCSSを適用する（ウィンドウモード=非表示 / Webモード=カスタム）。
+	// WebView2(Chromium)は ::-webkit-scrollbar 擬似要素でスタイリング可能なので、
+	// <style id="wscroll"> 要素を注入・上書きする。ページ遷移後は NavigationCompleted で再適用する。
+	private void ApplyScrollbarCss()
+	{
+		if (WebView?.CoreWebView2 == null)
+		{
+			return;
+		}
+		string css = _isWebMode
+			? "::-webkit-scrollbar{width:8px !important}::-webkit-scrollbar-track{background:rgba(180,180,180,0.25) !important;padding-top:48px !important}::-webkit-scrollbar-thumb{background:rgba(80,80,80,0.7) !important;border-radius:4px !important}::-webkit-scrollbar-thumb:hover{background:rgba(60,60,60,0.9) !important}"
+			: "::-webkit-scrollbar{display:none !important}";
+		_ = WebView.CoreWebView2.ExecuteScriptAsync(ScrollbarCssScript(css));
+	}
+
+	// wscroll スタイル要素の作成・上書き JS を生成する
+	private static string ScrollbarCssScript(string css)
+	{
+		return @"(function(){var s=document.getElementById('wscroll');if(!s){s=document.createElement('style');s.id='wscroll';(document.head||document.documentElement).appendChild(s);}s.textContent='" + css + "';})();";
 	}
 
 	private Window CreateOverlayWindow()

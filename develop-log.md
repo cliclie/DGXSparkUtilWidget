@@ -493,3 +493,39 @@ tools/
 - `tools/test_webmode_hit.ps1` で自動検証済み（2026-08-30）
 - ビルド確認: 0 errors, 0 warnings
 
+---
+
+## 20. Webモード時のスクロールバー表示制御とスタイリング（2026-08-30）
+
+### 問題
+- WebView2 のデフォルトスクロールバーがウィンドウモード・Webモード問わず常に表示される
+- スクロールバーの見た目がウィジェットと不調和（幅広・白系）
+- Webモード時のみスクロールバーを表示し、スタイルをカスタムしたい
+
+### 修正仕様
+| # | 項目 | 内容 |
+|---|------|------|
+| 1 | 表示制御 | Webモード時のみ表示、ウィンドウモード時は `display:none !important` で非表示 |
+| 2 | スクロールバースタイル | 幅 8px / トラック: `rgba(180,180,180,0.25)`（薄灰半透明）/ サム: `rgba(80,80,80,0.7)`（濃灰）+ `border-radius:4px` |
+| 3 | 上部余白 | `::-webkit-scrollbar-track` に `padding-top: 48px !important` |
+| 4 | 強制適用 | 全プロパティに `!important` 付与（ページ側CSSの上書き対応） |
+
+### 修正内容
+| ファイル | 変更 |
+|---|---|
+| `MainWindow.xaml.cs` | 新メソッド `ApplyScrollbarCss()` 追加：`_isWebMode` に応じてCSSを構築し `ExecuteScriptAsync` で `<style id="wscroll">` を上書き |
+| 同上 | `SetWebMode(true/false)` 末尾に `ApplyScrollbarCss()` を呼び出し |
+| 同上 | `NavigationCompleted` ハンドラに `ApplyScrollbarCss()` を追加（ページ遷移後に再適用） |
+| 同上 | `EnsureCoreWebView2Async` 直後に `AddScriptToExecuteOnDocumentCreatedAsync` で初期非表示CSSを先読み注入 |
+
+### テスト内容
+| フェーズ | 内容 | 判定基準 |
+|---|---|---|
+| A | ウィンドウモード: メイン中央 `WindowFromPoint` | `HwndWrapper`（アプリウィンドウ） |
+| B | WebToggle クリック → Webモード遷移 | `WS_EX_TRANSPARENT=False`、band 表示 |
+| C | Webモード: スクロールバー表示確認（目視） | 8px幅・薄灰トラック・上部48px余白・濃灰サム |
+| D | ウィンドウモード復帰: スクロールバー非表示確認（目視） | スクロールバー不可視 |
+
+- 自動テスト: `tools/test_webmode_hit.ps1`（Phase A/B/C の回帰確認）
+- 手動確認: Webモードでスクロール操作時にスクロールバーが正しく表示/追従すること
+
