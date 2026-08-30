@@ -17,8 +17,8 @@ test_position_restore.ps1
 $ErrorActionPreference = 'Stop'
 $proj = "d:\WhitebearATOM1\DGXSparkUtilWidget"
 $exe  = Join-Path $proj "bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe"
-$log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
-$cfg  = "$env:APPDATA\DGXSparkUtilWidget\settings.json"
+$log  = Join-Path (Split-Path $exe) "DGXSparkUtilWidget.log"
+$cfg  = Join-Path (Split-Path $exe) "DGXSparkUtilWidget.json"
 
 Get-Process DGXSparkUtilWidget -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1

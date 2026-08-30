@@ -21,7 +21,7 @@ DGX Spark Utility の Web 画面を Widget 風に表示する Windows デスク�
 | 最小化 / 最大化 / 閉じる | コントロールバーのボタンで操作 |
 | 設定ダイアログ | ハンバーガーメニューから URL・透過率の設定 |
 | 透過率調整 | 0.2〜1.0 で無段階にウィンドウ全体の不透明度を変更 |
-| 設定永続化 | `%APPDATA%\DGXSparkUtilWidget\settings.json` に JSON 保存 |
+| 設定永続化 | 実行ファイル（.exe）の同じディレクトリに `DGXSparkUtilWidget.json` として保存 |
 | 初回起動時の導入手順 | 設定値がない場合は設定ダイアログを自動表示 |
 
 ## プロジェクト構成
@@ -66,7 +66,7 @@ dotnet publish -c Release -r win-x64
 
 ## 設定ファイル
 
-- **パス**: `%APPDATA%\DGXSparkUtilWidget\settings.json`
+- **パス**: 実行ファイル（.exe）と同じディレクトリの `DGXSparkUtilWidget.json`
 - **形式**:
 
 ```json
@@ -80,6 +80,17 @@ dotnet publish -c Release -r win-x64
 |------|----|------|--------|
 | `Url` | string | 接続先 URL（http/https） | 空文字列 |
 | `Opacity` | double | ウィンドウの不透明度（0.2〜1.0） | 1.0 |
+
+## デバッグログ
+
+- 起動時に `-DEBUG` オプション（大文字小文字を区別しない）を指定すると、デバッグログが `.exe` の同じディレクトリに `DGXSparkUtilWidget.log` として出力されます。
+
+```bash
+DGXSparkUtilWidget.exe -DEBUG
+```
+
+- 開発ビルド（`bin\Debug\`）で実行する場合は、オプションなしでもデバッグログが出力されます。
+- 公開ビルド（`bin\Release\`）で `-DEBUG` を指定しない場合、ログは出力されません。
 
 ## 操作ガイド
 

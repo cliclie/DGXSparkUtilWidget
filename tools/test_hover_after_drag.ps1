@@ -17,13 +17,13 @@ test_hover_after_drag.ps1
 $ErrorActionPreference = 'Stop'
 $proj = "d:\WhitebearATOM1\DGXSparkUtilWidget"
 $exe  = Join-Path $proj "bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe"
-$log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
+$log  = Join-Path (Split-Path $exe) "DGXSparkUtilWidget.log"
 
 Get-Process DGXSparkUtilWidget -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 
 # テストはプライマリモニター上を前提にするため、保存された WindowBounds をクリアする（初回起動相当）
-$settingsPath = Join-Path $env:APPDATA "DGXSparkUtilWidget\settings.json"
+$settingsPath = Join-Path (Split-Path $exe) "DGXSparkUtilWidget.json"
 if (Test-Path $settingsPath) {
     $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
     if ($cfg.PSObject.Properties.Name -contains 'WindowBounds') {

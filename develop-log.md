@@ -600,3 +600,26 @@ tools/
 > - ホバー幅固定: `::-webkit-scrollbar-thumb` 本体と `:hover` 両方に
 >   `width:8px !important` を明示。ホバーで幅が変わる不具合を解消。
 
+---
+
+### 15. 設定・ログの保存先を exe 隣に集約 + ログ出力の条件化
+
+- **変更内容:**
+  - **設定ファイル・ログの保存先変更**: `%APPDATA%\DGXSparkUtilWidget\` 配下（`settings.json` / `debug.log`）から、**実行ファイル（.exe）の同じディレクトリ**に変更
+    - 設定ファイル名: `settings.json` → `DGXSparkUtilWidget.json`
+    - デバッグログ名: `debug.log` → `DGXSparkUtilWidget.log`
+  - **デバッグログの出力条件化**:
+    - `bin\Debug\` 配下の exe → **常に**デバッグログ出力
+    - `bin\Release\` 配下の exe → `-DEBUG` コマンドライン引数指定時のみ出力（大文字小文字を区別しない）
+    - `-DEBUG` がない Release 版ではログファイルが作成されない
+
+- **修正ファイル:**
+  - `MainWindow.xaml.cs`: `SettingsDirectory` を `AppDomain.CurrentDomain.BaseDirectory` に変更、`_debugMode` フラグ追加、`LogDebug()` 先頭にガード追加
+  - `README.md`: 設定ファイルパス・デバッグログの記述を更新、「デバッグログ」セクション追加
+  - `tools/*.ps1` (17ファイル): テストスクリプト内の設定/ログパスを exe 直下へ更新
+
+- **動作確認:**
+  - `dotnet build` 成功（0 errors）
+  - 旧 `%APPDATA%\DGXSparkUtilWidget\` 配下のデータは自動移行されない（初回起動時は設定なし状態）
+
+

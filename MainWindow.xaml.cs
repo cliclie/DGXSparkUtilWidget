@@ -92,9 +92,12 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private static readonly string SettingsDirectory = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DGXSparkUtilWidget");
+	private static readonly string SettingsDirectory = AppDomain.CurrentDomain.BaseDirectory;
 
-	private static readonly string SettingsPath = System.IO.Path.Combine(SettingsDirectory, "settings.json");
+	private static readonly string SettingsPath = System.IO.Path.Combine(SettingsDirectory, "DGXSparkUtilWidget.json");
+
+	private static readonly bool _debugMode = Environment.GetCommandLineArgs().Any(a => a.StartsWith("-", StringComparison.OrdinalIgnoreCase) && a.TrimStart('-').Equals("Debug", StringComparison.OrdinalIgnoreCase))
+		|| AppDomain.CurrentDomain.BaseDirectory.Contains("\\Debug\\", StringComparison.OrdinalIgnoreCase);
 
 	private string _currentUrl = string.Empty;
 
@@ -1680,10 +1683,11 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static void LogDebug(string message)
 	{
+		if (!_debugMode) return;
 		try
 		{
 			Directory.CreateDirectory(SettingsDirectory);
-			File.AppendAllText(System.IO.Path.Combine(SettingsDirectory, "debug.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+			File.AppendAllText(System.IO.Path.Combine(SettingsDirectory, "DGXSparkUtilWidget.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
 		}
 		catch
 		{

@@ -13,7 +13,7 @@ test_webmode_btn.ps1
 $ErrorActionPreference = 'Stop'
 $proj = "d:\WhitebearATOM1\DGXSparkUtilWidget"
 $exe  = Join-Path $proj "bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe"
-$log  = "$env:APPDATA\DGXSparkUtilWidget\debug.log"
+$log  = Join-Path (Split-Path $exe) "DGXSparkUtilWidget.log"
 
 Get-Process DGXSparkUtilWidget -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1

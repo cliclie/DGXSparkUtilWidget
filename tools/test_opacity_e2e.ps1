@@ -18,7 +18,7 @@ public class T {
 $AE = [System.Windows.Automation.AutomationElement]
 $root = $AE::RootElement
 $exe = 'D:\WhitebearATOM1\DGXSparkUtilWidget\bin\Debug\net9.0-windows\win-x64\DGXSparkUtilWidget.exe'
-$cfg = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'DGXSparkUtilWidget\settings.json'
+$cfg = Join-Path (Split-Path $exe) 'DGXSparkUtilWidget.json'
 Copy-Item $cfg "$cfg.bak" -Force
 
 function Set-Cfg([double]$op) {
