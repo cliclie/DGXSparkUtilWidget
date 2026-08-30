@@ -519,13 +519,14 @@ tools/
 | 同上 | `EnsureCoreWebView2Async` 直後に `AddScriptToExecuteOnDocumentCreatedAsync` で初期非表示CSSを先読み注入 |
 
 ### テスト内容
-| フェーズ | 内容 | 判定基準 |
-|---|---|---|
-| A | ウィンドウモード: メイン中央 `WindowFromPoint` | `HwndWrapper`（アプリウィンドウ） |
-| B | WebToggle クリック → Webモード遷移 | `WS_EX_TRANSPARENT=False`、band 表示 |
-| C | Webモード: スクロールバー表示確認（目視） | 8px幅・薄灰トラック・上部48px余白・濃灰サム |
-| D | ウィンドウモード復帰: スクロールバー非表示確認（目視） | スクロールバー不可視 |
+| フェーズ | 内容 | 判定基準 | 結果 |
+|---|---|---|---|
+| A | ウィンドウモード: メイン中央 `WindowFromPoint` | `HwndWrapper`（アプリウィンドウ） | OK |
+| B | WebToggle クリック → Webモード遷移 | `WS_EX_TRANSPARENT=False`、band 表示 | OK |
+| C | Webモード: スクロールバー表示確認（目視） | 8px幅・薄灰トラック・上部48px余白・濃灰サム | OK |
+| D | ウィンドウモード復帰: スクロールバー非表示確認（目視） | スクロールバー不可視 | OK |
 
-- 自動テスト: `tools/test_webmode_hit.ps1`（Phase A/B/C の回帰確認）
+- 自動テスト: `tools/test_webmode_hit.ps1`（Phase A/B/C の回帰確認）— 2026-08-30 実行 OK
 - 手動確認: Webモードでスクロール操作時にスクロールバーが正しく表示/追従すること
+- ビルド確認: 0 errors
 
