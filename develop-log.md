@@ -506,9 +506,51 @@ tools/
 | # | 項目 | 内容 |
 |---|------|------|
 | 1 | 表示制御 | Webモード時のみ表示、ウィンドウモード時は `display:none !important` で非表示 |
-| 2 | スクロールバースタイル | 幅 8px / トラック: `rgba(180,180,180,0.25)`（薄灰半透明）/ サム: `rgba(80,80,80,0.7)`（濃灰）+ `border-radius:4px` |
-| 3 | 上部余白 | `::-webkit-scrollbar-track` に `padding-top: 48px !important` |
-| 4 | 強制適用 | 全プロパティに `!important` 付与（ページ側CSSの上書き対応） |
+| 2 | スクロールバースタイル | スクロールバー幅 16px / サム: 幅 8px・`rgba(80,80,80,0.7)`（濃灰）+ `border-radius:4px` / ホバー: `rgba(60,60,60,0.9)` |
+| 3 | 上端余白 48px | `::-webkit-scrollbar-button:vertical-start { height: 48px }` で確保 |
+| 4 | 左右・下端余白 4px | サムに `border:4px solid transparent` + `background-clip:padding-box` で可視幅8px・左右各4pxを確保。下端は `vertical-end { height: 4px }` |
+| 5 | 背景 | スクロールバー・トラック・交差(`::-webkit-scrollbar-corner`)とも完全透明（`transparent`） |
+| 6 | 強制適用・互換性 | 全プロパティに `!important` 付与（ページ側CSSの上書き対応）。加えて `*{scrollbar-width:auto;scrollbar-color:auto}` により標準 scrollbar プロパティが webkit スタイリングを無効化するのを防ぐ（MDN互換性ルール） |
+
+> **追記（2026-08-30・初回実装後の修正）:**
+> 初回実装では上端余白に `::-webkit-scrollbar-track` の `padding-top: 48px` を使用したが、
+> 実機で効いておらず（サムが上端から始まる）、`vertical-start` ボタン要素の `height` による
+> 方式に切り替えた。またトラック背景 `rgba(180,180,180,0.25)` は完全透明に変更し、
+> サム幅 8px + スクロールバー幅 16px により左右 4px の余白も確保した。
+
+> **追記2（2026-08-30・実機確認後・padding不具合の再修正）:**
+> 初回修正後も上下左右のpaddingが実機で効かないことが判明。原因と対応:
+> 1. **`scrollbar-width` / `scrollbar-color` による無効化**（MDN互換性ルール）:
+>    ページ側またはUAが `scrollbar-width`/`scrollbar-color` を `auto` 以外に設定している場合、
+>    `::-webkit-scrollbar-*` 擬似要素が全て無視される。対策として先頭に
+>    `*{scrollbar-width:auto !important;scrollbar-color:auto !important}` を追加。
+> 2. **サム左右・上下の余白**: `width:8px` 単独ではChromiumのサム中央配置が
+>    期待通りにならない場合があるため、`border:4px solid transparent` +
+>    `background-clip:padding-box` でサム自体の可視領域を8pxに制限。
+>    これで左右各4px・上下各4pxの透明マージンを確実に出す。
+> 3. **ボタン要素の border 除去**: `::-webkit-scrollbar-button` に `border:none` を追加し、
+>    UAデフォルトのボタン枠が現れないよう対処。
+> 4. **`::-webkit-scrollbar-corner` の追加**: 交差点も透明に指定。
+> 5. **JS注入の強化**: 単一引用符による文字列埋め込みをテンプレートリテラル（`` ` ``）に
+>    変更し、CSS内の特殊文字による破損を回避。
+
+> **追記4（2026-08-30・border-top方式の破棄とmargin方式への切替）:**
+>
+> headless Edge による対比検証（button-height / track margin / track border-top の3方式）の結果、
+> `border-top` による上端ギャップ確保は **サム位置に影響しない** ことが判明。
+> 一方、`margin-top` はトラックの描画領域自体を押し下げ、サムが確実に48px下がり、
+> 所望のトップギャップが得られた。
+>
+> 最終採用 CSS:
+> ```css
+> ::-webkit-scrollbar-track {
+>   background: transparent !important;
+>   margin-top: 48px !important;   /* コントロールバー高 */
+>   margin-bottom: 4px !important;
+> }
+> ```
+> ※ 左右4pxは scrollbar幅16px − サム幅8px の差で確保（track border不要）。
+> ※ サムの `:hover` にも `width:8px !important` を明示し、幅変動を防止。
 
 ### 修正内容
 | ファイル | 変更 |
@@ -523,10 +565,38 @@ tools/
 |---|---|---|---|
 | A | ウィンドウモード: メイン中央 `WindowFromPoint` | `HwndWrapper`（アプリウィンドウ） | OK |
 | B | WebToggle クリック → Webモード遷移 | `WS_EX_TRANSPARENT=False`、band 表示 | OK |
-| C | Webモード: スクロールバー表示確認（目視） | 8px幅・薄灰トラック・上部48px余白・濃灰サム | OK |
+| C | Webモード: スクロールバー表示確認（目視） | 背景完全透明 / 上端48px・左右4px・下端4pxの余白 / 8px幅の濃灰サム | OK |
 | D | ウィンドウモード復帰: スクロールバー非表示確認（目視） | スクロールバー不可視 | OK |
 
 - 自動テスト: `tools/test_webmode_hit.ps1`（Phase A/B/C の回帰確認）— 2026-08-30 実行 OK
 - 手動確認: Webモードでスクロール操作時にスクロールバーが正しく表示/追従すること
 - ビルド確認: 0 errors
+
+> **追記3（2026-08-30・実機確認後・JS構文バグ修正とCSS方式の見直し）:**
+>
+> 実機確認で「上端48pxのpaddingが効かない」「ホバーでサム幅が広がる」が継続していた。
+>
+> **根本原因: JS構文エラーによりCSSが一切適用されていない**
+> - 旧 `ScrollbarCssScript` はテンプレートリテラル（バッククォート）を使用していたが、
+>   生成コードの末尾が `;)};)"` となり JavaScript 構文エラーとなっていた。
+>   結果、`ExecuteScriptAsync` が例外を投じ、`<style>` 要素が生成されず
+>   **すべてのスクロールバースタイルが反映されていなかった**。
+> - 修正: 単一引用符エスケープ + バランスの取れた IIFE に再実装。
+>   生成 JS 例:
+>   ```js
+>   (function(){var s=document.getElementById('wscroll');
+>     if(!s){s=document.createElement('style');s.id='wscroll';
+>     (document.head||document.documentElement).appendChild(s);}
+>     s.textContent='...';})();
+>   ```
+>
+> **CSS方式の見直し（button-height / サムborder → track border）:**
+> - 上端48px: `::-webkit-scrollbar-track { border-top:48px solid transparent }` で確保。
+>   Chromium は scrollbar-track の border をレイアウトに反映するため、
+>   サムが上端から48px下がって開始する（headless Edge で検証済み）。
+> - 左右・下端4px: サムの `border`+`background-clip:padding-box` 方式を廃止。
+>   代わりに `::-webkit-scrollbar-track { border:4px solid transparent }` で確保。
+>   スクロールバー幅16px・サム8px の差と組み合わせることで左右4pxを担保。
+> - ホバー幅固定: `::-webkit-scrollbar-thumb` 本体と `:hover` 両方に
+>   `width:8px !important` を明示。ホバーで幅が変わる不具合を解消。
 

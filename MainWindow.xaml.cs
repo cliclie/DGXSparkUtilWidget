@@ -612,15 +612,31 @@ public partial class MainWindow : Window, IComponentConnector
 			return;
 		}
 		string css = _isWebMode
-			? "::-webkit-scrollbar{width:8px !important}::-webkit-scrollbar-track{background:rgba(180,180,180,0.25) !important;padding-top:48px !important}::-webkit-scrollbar-thumb{background:rgba(80,80,80,0.7) !important;border-radius:4px !important}::-webkit-scrollbar-thumb:hover{background:rgba(60,60,60,0.9) !important}"
+			// 各要素の scrollbar-width/scrollbar-color が auto 以外だと ::-webkit-scrollbar-* が無効化されるため、
+			// auto に戻して WebKit スクロールバー擬似要素のスタイリングを必ず有効にする（MDN 記載の互換性ルール）。
+			? "*{scrollbar-width:auto !important;scrollbar-color:auto !important}" +
+			"::-webkit-scrollbar{width:16px !important;height:16px !important;background:transparent !important}" +
+			"::-webkit-scrollbar-corner{background:transparent !important}" +
+			// 上端48px（コントロールバー高）・下端4pxの余白はトラックの margin で確保。
+				// （headless Edge 検証: track の margin-top/bottom でサムの移動範囲が上下に縮み、
+		//   余白が確保される。border 方式はサム位置に影響しないため非採用）
+			"::-webkit-scrollbar-track{background:transparent !important;margin-top:48px !important;margin-bottom:4px !important}" +
+			// サム: 幅8px・角丸・濃灰。ホバー時は色のみ変えて幅は固定（ホバーで幅が広がる不具合の回避）。
+			"::-webkit-scrollbar-thumb{width:8px !important;background:rgba(80,80,80,0.7) !important;border-radius:4px !important}" +
+			"::-webkit-scrollbar-thumb:hover{width:8px !important;background:rgba(60,60,60,0.9) !important}"
 			: "::-webkit-scrollbar{display:none !important}";
 		_ = WebView.CoreWebView2.ExecuteScriptAsync(ScrollbarCssScript(css));
 	}
 
 	// wscroll スタイル要素の作成・上書き JS を生成する
+	// CSS を JS の single-quoted string として安全に埋め込む（' と \ をエスケープ）
 	private static string ScrollbarCssScript(string css)
 	{
-		return @"(function(){var s=document.getElementById('wscroll');if(!s){s=document.createElement('style');s.id='wscroll';(document.head||document.documentElement).appendChild(s);}s.textContent='" + css + "';})();";
+		string safe = css.Replace("\\", "\\\\").Replace("'", "\\'");
+		return "(function(){var s=document.getElementById('wscroll');"
+			+ "if(!s){s=document.createElement('style');s.id='wscroll';"
+			+ "(document.head||document.documentElement).appendChild(s);}"
+			+ "s.textContent='" + safe + "';})();";
 	}
 
 	private Window CreateOverlayWindow()
