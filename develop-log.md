@@ -450,5 +450,46 @@ tools/
 - E2E テストは UIA で設定ダイアログを開くため、Web モード復帰時のホバー操作と干渉しない
 
 ### 既知の残タスク
-- **Web 操作モードの不具合（新規）**: Web モードでマウス操作が WebView2 に届かず**背面のウィンドウに貫通する**（Web 切替が無効になったように見える）。透過率とは別の問題。`AllowsTransparency=True` 復元 / WS_EX_TRANSPARENT の付与・解除タイミングと hit test の相互作用が疑われるため、次回セッションで調査予定
+- ~~**Web 操作モードの不具合（新規）**: Web モードでマウス操作が WebView2 に届かず**背面のウィンドウに貫通する**~~ → #19 で修正
+
+---
+
+## 19. Web モードでのマウス入力の WebView2 到達失敗修正（2026-08-30）
+
+### 問題
+- Web モード（`_isWebMode = true`）でマウス操作が WebView2 に届かず、背面のウィンドウに貫通する
+- Web 切替が実行されたように見えるが、実際には入力を受信できない
+
+### 根本原因
+- `AllowsTransparency=True` がメインウィンドウの HWND に `WS_EX_LAYERED` を付与
+- `RootBorder` の `Background="Transparent"` により WPF レイヤーの全ピクセルが alpha=0 で描画
+- Web モード時に `OnMainWindowHook` が `WM_NCHITTEST` に対して `handled=false`（WPF デフォルトハンドラに委譲）を返していた
+- WPF デフォルトハンドラがレイヤードウィンドウのピクセル単位 alpha をチェックし、alpha=0 のピクセルで `HTTRANSPARENT` を返す
+- 結果: OS がクリックを「メインウィンドウは透明」と判定し、背面のウィンドウにルーティング
+
+### 修正内容
+| ファイル | 変更 |
+|---|---|
+| `MainWindow.xaml.cs` | `OnMainWindowHook` 内で Web モード時に `HTCLIENT`(1) を明示的に返すよう変更 |
+| `MainWindow.xaml.cs` | `SetWebMode(true)` で `RootBorder.Background` を `Color.FromArgb(1,0,0,0)`（alpha=1）に設定、`SetWebMode(false)` で `Brushes.Transparent` に戻す |
+
+> **補足（2026-08-30 追記・実機検証で判明）:**
+> 上記 `HTCLIENT` フックだけでは不十分だった。WPF の `AllowsTransparency=True`
+> ウィンドウでは、`HwndSource` が `WM_NCHITTEST` をフックより前に内部処理するため、
+> フックでの返却値が効かない。実質的な原因は「layered window の DIB が全ピクセル
+> alpha=0」であり、OS レベルのピクセル alpha チェックで透過判定されてしまう。
+> 対策として Web モード時に `RootBorder` の背景を alpha=1（視覚的には完全に透明）
+> に設定し、DIB の alpha を 0 でなくすることで OS の透過判定を回避する。
+> ウィンドウモード時は `Brushes.Transparent`（alpha=0）に戻し、従来どおり
+> オーバーレイ経由の入力処理に委譲する。
+
+### テスト
+| フェーズ | 内容 | 結果 |
+|---|---|---|
+| A | ウィンドウモードで `WindowFromPoint`（メイン中央）| OK: `HwndWrapper[DGXSparkUtilWidget;...]`（アプリ内ウィンドウ） |
+| B | 制御バー WebToggle クリック → Web モード遷移 | OK（`WS_EX_TRANSPARENT=False`、band・webmode-btn 表示確認） |
+| C | Web モードで `WindowFromPoint`（メイン中央）| **OK: `Chrome_RenderWidgetHostHWND`（WebView2 に到達）** |
+
+- `tools/test_webmode_hit.ps1` で自動検証済み（2026-08-30）
+- ビルド確認: 0 errors, 0 warnings
 

@@ -570,6 +570,11 @@ public partial class MainWindow : Window, IComponentConnector
 			ShowWebModeButtonWindow();
 			SetMainHitTestTransparent(transparent: false);
 			PinWebModeButtonAboveMain();
+			// layered window (WS_EX_LAYERED) はピクセル alpha=0 で OS hit-test が
+			// HTTRANSPARENT となり、WM_NCHITTEST フックで HTCLIENT を返しても
+			// クリックが背面ウィンドウに透過する。
+			// alpha=1 (視覚的には完全に透明) にすることで透過を防止する。
+			RootBorder.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(1, 0, 0, 0));
 		}
 		else
 		{
@@ -587,6 +592,7 @@ public partial class MainWindow : Window, IComponentConnector
 				ShowControlBar();
 			}
 			SetMainHitTestTransparent(transparent: true);
+			RootBorder.Background = System.Windows.Media.Brushes.Transparent;
 		}
 		_wasWebMode = webMode;
 	}
@@ -1179,10 +1185,18 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		if (!_isWebMode)
 		{
+			// ウィンドウモード: 入力を完全に遮断（オーバーレイウィンドウが担当）
 			handled = true;
-			return new IntPtr(-1);
+			return new IntPtr(-1); // HTTRANSPARENT
 		}
-		return IntPtr.Zero;
+		// Webモード: HTCLIENT を明示的に返す。
+		// AllowsTransparency=True によりメインウィンドウは WS_EX_LAYERED であり、
+		// WPF デフォルトハンドラが Background=Transparent のピクセルで
+		// HTTRANSPARENT を返すと、クリックが背面ウィンドウに貫通する。
+		// HTCLIENT を返すことで OS が ChildWindowFromPoint 経由で
+		// WebView2 の子HWND（Chrome_RenderWidgetHostHWND）にルーティングする。
+		handled = true;
+		return new IntPtr(1); // HTCLIENT
 	}
 
 	private void PinOverlayBelowMain()
