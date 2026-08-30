@@ -24,8 +24,9 @@ DGX Spark Utility の Web 画面を、**常時最前面・フレームレス・�
 |------|----|
 | 言語 / フレームワーク | C# / WPF |
 | ターゲットフレームワーク | `net9.0-windows` |
-| 出力形式 | 自己完結型・単一ファイル `.exe`（`SelfContained` + `PublishSingleFile`） |
-| ランタイム ID | `win-x64` |
+| ランタイム ID | `win-x64`（全構成で固定、出力パス `bin\<cfg>\net9.0-windows\win-x64\`） |
+| 出力形式 | Debug: フレームワーク依存（.NET 9 Desktop Runtime 前提の高速ビルド）/ Release: 自己完結型（`SelfContained`、ランタイム内包） |
+| 公開形式 | 単一ファイル `.exe`（`PublishSingleFile` + `IncludeNativeLibrariesForSelfExtract`、Release の publish 時のみ適用） |
 | 依存パッケージ | `Microsoft.Web.WebView2` `1.0.2651.64` |
 | アプリケーションアイコン | `images\DGXSpark.ico`（リソースとしても組み込み） |
 
@@ -33,9 +34,11 @@ DGX Spark Utility の Web 画面を、**常時最前面・フレームレス・�
 - `tools\**\*.cs` はビルド対象から除外する（診断用 P/Invoke ヘルパーがアプリに混入しないため）。
 
 ビルド:
-- 開発ビルド: `dotnet build`
+- 開発ビルド: `dotnet build`（Debug、フレームワーク依存 → 実行時に .NET 9 Desktop Runtime が必要、ビルド高速）
+- Release ビルド: `dotnet build -c Release`（自己完結型、exe + ランタイムDLL群）
 - 公開ビルド（単一ファイル）: `dotnet publish -c Release -r win-x64`
   - 公開先: `bin/Release/net9.0-windows/win-x64/publish/DGXSparkUtilWidget.exe`
+  - 単一の `.exe` が生成され、別フォルダに exe 単体をコピーして実行可能。設定ファイル・ログは exe と同じフォルダに保存される（§7.1, §9 参照）
 
 ## 3. プロジェクト構成
 
@@ -205,7 +208,7 @@ Web 復帰ボタン（§4.5）または ⚡ ボタンで `SetWebMode(webMode: fa
 ## 7. 設定 / 永続化
 
 ### 7.1 設定ファイル
-- **パス**: 実行ファイルのディレクトリ（`AppDomain.CurrentDomain.BaseDirectory`）配下の `DGXSparkUtilWidget.json`。
+- **パス**: exe と同じディレクトリの `DGXSparkUtilWidget.json`。ディレクトリは `Environment.ProcessPath`（実行中 exe の実パス）の親ディレクトリから取得する。単一ファイル公開ビルドでは `AppDomain.CurrentDomain.BaseDirectory` が一時展開先を指すため使用しない（exe をフォルダ間で移動しても設定が exe に追従する）。
 - **形式**: JSON（読み込み時はプロパティ名の大文字小文字を無視、書き込み時はインデント付き）。
 
 | キー | 型 | 説明 | 既定値 |
@@ -268,7 +271,7 @@ Web 復帰ボタン（§4.5）または ⚡ ボタンで `SetWebMode(webMode: fa
 
 ## 9. コマンドライン / デバッグログ
 
-- `-DEBUG` オプション（大文字小文字を区別しない、`-` 接頭辞で一致）を指定したとき、または **Debug ビルドディレクトリ**（`...\Debug\` を含む）で実行したときにデバッグログを有効化。
+- `-DEBUG` オプション（大文字小文字を区別しない、`-` 接頭辞で一致）を指定したとき、または**実行中の exe のフルパスに `...\Debug\` を含む場合**（Debug ビルドを実行ディレクトリから実行した場合）にデバッグログを有効化。単一ファイル公開 exe はパスが移動先になるため、`-DEBUG` 指定時のみ有効になる。
 - ログは `DGXSparkUtilWidget.log`（設定ディレクトリ）に追記形式で書き出される。
 - 公開ビルドで `-DEBUG` なしの場合、ログは出力されない。
 - ログ対象例: 起動・WebView2 初期化・ホスト HWND 発見・透過適用・ナビゲート・モード切替・ドラッグ / リサイズ / ホバー状態・最小化 / 最大化 / 閉じる・Z-order 再固定 等。

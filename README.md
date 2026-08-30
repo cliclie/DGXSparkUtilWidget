@@ -50,11 +50,16 @@ DGXSparkUtilWidget/
 - [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
 - [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)（Windows 10/11 にプリインストールされている場合が多い）
 
-### 開発用ビルド
+### 開発用ビルド（Debug）
+
+繰り返しテスト用に高速なフレームワーク依存ビルドを行います（exe とランタイムDLL群が同フォルダに配置されます）。
 
 ```bash
 dotnet build
 ```
+
+- 実行には .NET 9 Desktop Runtime のインストールが必要です
+- 開発ビルド（`bin\Debug\`）で実行する場合は、オプションなしでもデバッグログが出力されます
 
 ### 単一ファイル公開（自己完結型 .exe）
 
@@ -63,6 +68,9 @@ dotnet publish -c Release -r win-x64
 ```
 
 公開先: `bin/Release/net9.0-windows/win-x64/publish/DGXSparkUtilWidget.exe`
+
+- .NET ランタイムを内包した単一の `.exe` になります
+- 別フォルダに `.exe` 単体をコピーしてそのまま実行できます（設定ファイル・ログは exe と同じフォルダに保存されます）
 
 ## 設定ファイル
 

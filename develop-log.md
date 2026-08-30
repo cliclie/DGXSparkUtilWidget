@@ -518,6 +518,36 @@ tools/
 > 方式に切り替えた。またトラック背景 `rgba(180,180,180,0.25)` は完全透明に変更し、
 > サム幅 8px + スクロールバー幅 16px により左右 4px の余白も確保した。
 
+---
+
+## 21. ビルド構成の分離（Debug 高速ビルド / Release 単体 exe）と exe 実パス基準の設定・ログ保存（2026-08-31）
+
+### 要件
+- `bin\Debug` は繰り返しテストが早く行えるよう**ビルド速度優先**（フレームワーク依存・DLL フォルダ形式）
+- `bin\Release` は `dotnet publish` 時に**単体 exe**（自己完結・単一ファイル）としてビルドされること
+- 単体 exe は別フォルダに exe 単体をコピーしてそのまま実行でき、設定・ログも exe と同じフォルダに保存される
+
+### 変更内容
+| # | ファイル | 変更 |
+|---|---|---|
+| 1 | `DGXSparkUtilWidget.csproj` | `RuntimeIdentifier=win-x64` は全構成で固定（出力パス `bin\<cfg>\net9.0-windows\win-x64\` を維持し tools スクリプトのパス参照を維持）。`SelfContained` / `PublishSingleFile` / `IncludeNativeLibrariesForSelfExtract` を `Condition="'$(Configuration)' == 'Release'"` の条件付き PropertyGroup に移動 |
+| 2 | `MainWindow.xaml.cs` | 設定・ログディレクトリを `AppDomain.CurrentDomain.BaseDirectory` → `Environment.ProcessPath`（実行中 exe の実パス）の親ディレクトリに変更。単一ファイル公開ビルドでは `BaseDirectory` が `%TEMP%` の自己展開先を指するため、exe をフォルダ間で移動しても設定・ログが exe に追従する。`_debugMode` の `\Debug\` チェックも同様に exe 実パス基準に変更 |
+| 3 | `README.md` | ビルド節を「Debug=フレームワーク依存（.NET 9 Desktop Runtime 前提・高速）/ Release publish=単体 exe（別フォルダへ exe 単体コピー可）」に更新 |
+| 4 | `specification.md` | §2（出力形式・公開形式・ビルド手順）、§7.1（設定ファイルパスを `Environment.ProcessPath` 基準に）、§9（`-DEBUG` 判定を exe 実パス基準に）を更新 |
+
+### ビルド出力の整理
+| コマンド | 出力 |
+|---|---|
+| `dotnet build`（Debug） | フレームワーク依存（`coreclr.dll` 等なし）、exe + WebView2 系 DLL のフォルダ形式。約 1〜3 秒 |
+| `dotnet build -c Release` | 自己完結型（exe + ランタイム DLL 群） |
+| `dotnet publish -c Release` | **単一ファイル** `publish\DGXSparkUtilWidget.exe`（約 129.5MB、.NET ランタイム内包） |
+
+### 動作確認
+- `dotnet build`（Debug）: 0 errors、フレームワーク依存化を確認（`bin\Debug\net9.0-windows\win-x64` に `coreclr.dll` なし）
+- `dotnet publish -c Release`: 単一 exe（135,718,744 bytes）を publish フォルダに生成
+- 単体テスト: publish exe を exe 単体で別フォルダにコピーし `-DEBUG` 実行 → 正常起動、**exe の隣に `DGXSparkUtilWidget.log` が生成**された（`Environment.ProcessPath` 基準が単体 exe 下でも機能することを確認）
+- 初回起動（設定ファイルなし）→ 導入手順（設定ダイアログ表示）が従来どおり動作
+
 > **追記2（2026-08-30・実機確認後・padding不具合の再修正）:**
 > 初回修正後も上下左右のpaddingが実機で効かないことが判明。原因と対応:
 > 1. **`scrollbar-width` / `scrollbar-color` による無効化**（MDN互換性ルール）:

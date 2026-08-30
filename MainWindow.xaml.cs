@@ -92,12 +92,15 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private static readonly string SettingsDirectory = AppDomain.CurrentDomain.BaseDirectory;
+	// 単一ファイル公開ビルドでも exe の実配置フォルダを参照（BaseDirectory は単体exeでは一時展開先を指すため不使用）
+	private static readonly string SettingsDirectory =
+		System.IO.Path.GetDirectoryName(Environment.ProcessPath ?? string.Empty)
+		?? System.IO.Directory.GetCurrentDirectory();
 
 	private static readonly string SettingsPath = System.IO.Path.Combine(SettingsDirectory, "DGXSparkUtilWidget.json");
 
 	private static readonly bool _debugMode = Environment.GetCommandLineArgs().Any(a => a.StartsWith("-", StringComparison.OrdinalIgnoreCase) && a.TrimStart('-').Equals("Debug", StringComparison.OrdinalIgnoreCase))
-		|| AppDomain.CurrentDomain.BaseDirectory.Contains("\\Debug\\", StringComparison.OrdinalIgnoreCase);
+		|| (Environment.ProcessPath?.Contains("\\Debug\\", StringComparison.OrdinalIgnoreCase) ?? false);
 
 	private string _currentUrl = string.Empty;
 

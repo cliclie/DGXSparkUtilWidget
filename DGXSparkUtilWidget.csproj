@@ -10,10 +10,19 @@
     <AssemblyName>DGXSparkUtilWidget</AssemblyName>
     <!-- プログラムアイコン -->
     <ApplicationIcon>images\DGXSpark.ico</ApplicationIcon>
-    <!-- 単一ファイル公開設定 -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
+    <!-- RID は全構成で固定し、出力パス（bin\<cfg>\net9.0-windows\win-x64\）を統一 -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <!--
+    Release 構成のみランタイムを内包する。
+    - dotnet build -c Release      : 自己完結型（exe+ランタイムDLL群）
+    - dotnet publish -c Release    : 単一ファイルの自己完結型 exe が publish フォルダに出力される
+    Debug 構成はフレームワーク依存の高速ビルド（.NET Desktop Runtime 前提）。
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
