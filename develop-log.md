@@ -671,4 +671,35 @@ tools/
   - ドキュメント（仕様書・ルールの）みの変更であり、コード / ビルドへ影響なし
   - README.md は現行でも実装と整合しているため変更なし
 
+---
+
+## 2026-09-02
+
+### 17. 全ウィンドウの Topmost 解除（通常ウィンドウ化）とウィンドウクリックによる前面化
+
+- **要件:**
+  - 起動後、全ウィンドウが常に最前面（Topmost）固定されているが、通常のウィンドウとして動作させたい（他ウィンドウの下に隠せること）
+- **Topmost 解除で顕在化した不具合:**
+  - Topmost 解除後、他ウィンドウの下に沈んだ状態で本体をクリックしても前面化されない（タスクバーのクリックは前面化される）
+  - **根因:** ウィンドウモードではメインウィンドウが `WS_EX_TRANSPARENT` ＋ `WM_NCHITTEST → HTTRANSPARENT` でクリックを下のオーバーレイに透過しているが、そのオーバーレイは `WS_EX_NOACTIVATE`（0x8000000）が付与されているため、クリックしてもアクティベーション・前面化が一切起きない
+- **変更内容:**
+  - **Topmost の全解除**（全 6 箇所）:
+    - `MainWindow.xaml`（メイン）/ `ControlBarWindow.xaml`（コントロールバー）/ `SettingsDialog.xaml`（設定ダイアログ）: `Topmost="True"` を削除
+    - `MainWindow.xaml.cs`: オーバーレイ（`CreateOverlayWindow`）・リサイズ帯 4 本（`CreateResizeBands`）・Web モード復帰ボタン（`ShowWebModeButtonWindow`）の `Topmost = true` を削除
+  - **クリックによる前面化（`RaiseMainToForeground`）新規追加**（`MainWindow.xaml.cs`）:
+    - `SetForegroundWindow` P/Invoke を追加
+    - `SetWindowPos(HWND_TOP)` ＋ `SetForegroundWindow` でメインウィンドウを最前面化・アクティベート
+    - `Overlay_MouseDown`（ウィンドウモード）/ `RootBorder_MouseLeftButtonDown`（Web モード）/ `Band_MouseDown`（Web モードのリサイズ帯）の先頭で呼出。発火する `Activated` ハンドラが既存の `PinOverlayBelowMain()` / `BringToFront(コントロールバー)` で Z 関係を再固定するため、従来のレイヤー構成（オーバーレイがメインの手前等）は維持される
+- **修正ファイル:**
+  - `MainWindow.xaml` / `ControlBarWindow.xaml` / `SettingsDialog.xaml` / `MainWindow.xaml.cs` / `ControlBarWindow.xaml.cs`（クラスコメント修正）
+  - `README.md`: 「常に最前面」機能を「通常ウィンドウ（本体クリックで前面化）」に更新
+  - `specification.md`: §1 概要 / §3 構成 / §4.1・4.2・8（Topmost 項目）・§6.5 Z-order 維持（前面化挙動を追記）・§11 制約・注意点を更新
+- **動作確認:**
+  - `dotnet build`: 0 errors
+  - `dotnet publish -c Release -r win-x64`: 単体 exe 生成（`bin\Release\net9.0-windows\win-x64\publish\DGXSparkUtilWidget.exe`）
+  - 実機確認:
+    1. 他ウィンドウが上に重なること → OK
+    2. 重なりの下にある状態でウィンドウ本体をクリック → 前面化 OK
+    3. タスクバークリックでの前面化 → 従来通り OK
+
 

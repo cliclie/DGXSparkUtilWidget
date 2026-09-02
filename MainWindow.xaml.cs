@@ -1114,6 +1114,7 @@ public partial class MainWindow : Window, IComponentConnector
 	{
 		if (e.ChangedButton == MouseButton.Left && e.ButtonState == MouseButtonState.Pressed)
 		{
+			RaiseMainToForeground();
 			GetCursorPos(out var pt);
 			HwndSource hwndSource = (HwndSource)PresentationSource.FromVisual(this);
 			double num = hwndSource?.CompositionTarget.TransformToDevice.M11 ?? 1.0;

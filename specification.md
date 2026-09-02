@@ -191,7 +191,7 @@ Web 復帰ボタン（§4.5）または ⚡ ボタンで `SetWebMode(webMode: fa
 - ウィンドウモードではオーバーレイがメインより前面、Web モードでは「Web 復帰ボタン > リサイズバンド > メイン」の順を維持。
 - 各ウィンドウは独立したトップレベルウィンドウのため Z-order 競合が起き得る。`_webModePinTimer`（400ms）で `GetTopWindow` 経由の Z-order を走査し、関係が崩れたら `SetWindowPos(HWND_TOP)` / `BringToFront` で再固定（re-pin）。
 - メインウィンドウがアクティブ化（`Activated`）したときも、オーバーレイ / コントロールバーを前面に固定し直す。
-- **クリックによる前面化（`RaiseMainToForeground`）**: 全ウィンドウが非 Topmost（通常 Z-order 帯）のため、他ウィンドウの下に沈んだ状態で本体をクリックしても自動的に前面化されない。そこで `Overlay_MouseDown`（ウィンドウモード）と `RootBorder_MouseLeftButtonDown`（Web モード）で `RaiseMainToForeground()` を呼び、`SetWindowPos(HWND_TOP)` + `SetForegroundWindow` でメインを最前面化・アクティベートする。これに伴う `Activated` ハンドラがオーバーレイ・コントロールバーの Z 関係を再固定する。
+- **クリックによる前面化（`RaiseMainToForeground`）**: 全ウィンドウが非 Topmost（通常 Z-order 帯）のため、他ウィンドウの下に沈んだ状態で本体をクリックしても自動的に前面化されない。そこで `Overlay_MouseDown`（ウィンドウモード）/ `RootBorder_MouseLeftButtonDown`（Web モード）/ `Band_MouseDown`（Web モードのリサイズ帯）で `RaiseMainToForeground()` を呼び、`SetWindowPos(HWND_TOP)` + `SetForegroundWindow` でメインを最前面化・アクティベートする。これに伴う `Activated` ハンドラがオーバーレイ・コントロールバーの Z 関係を再固定する。
 
 ### 6.6 初回起動時の導入手順
 - `MainWindow_Loaded` で WebView2 を初期化し、設定を読み込み（`LoadSettings`）。
