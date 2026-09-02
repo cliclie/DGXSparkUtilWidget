@@ -8,7 +8,7 @@
 
 ## 1. 概要
 
-DGX Spark Utility の Web 画面を、**常時最前面・フレームレス・角丸**のウィジェットとして表示する Windows デスクトップアプリ。
+DGX Spark Utility の Web 画面を、**最前面固定なし（通常ウィンドウ）・フレームレス・角丸**のウィジェットとして表示する Windows デスクトップアプリ。
 既定では Web ページへの OS 入力を遮断し「ウィンドウそのものとして扱う」（移動・リサイズ・最小化・最大化）ことができ、
 必要に応じて Web ページを直接操作するモードに切り替えられる。
 
@@ -48,7 +48,7 @@ DGXSparkUtilWidget/
 ├── DGXSparkUtilWidget.csproj        # プロジェクトファイル
 ├── App.xaml / App.xaml.cs           # エントリポイント（StartupUri = MainWindow）
 ├── MainWindow.xaml / .xaml.cs       # メインウィンドウ（WebView2 + 入力遮断・位置・透過・設定）
-├── ControlBarWindow.xaml / .xaml.cs # フローティングコントロールバー（独立 Topmost ウィンドウ）
+├── ControlBarWindow.xaml / .xaml.cs # フローティングコントロールバー（独立ウィンドウ）
 ├── SettingsDialog.xaml / .xaml.cs   # 設定ダイアログ
 ├── images/
 │   ├── DGXSpark.ico                 # アプリケーションアイコン
@@ -63,7 +63,7 @@ DGXSparkUtilWidget/
 
 ## 4. ウィンドウ構成
 
-アプリは、機能分離のため**複数の Topmost な小型ウィンドウ**を組み合わせて構成する。
+アプリは、機能分離のため**複数の（最前面固定なしの）小型ウィンドウ**を組み合わせて構成する。
 
 ### 4.1 メインウィンドウ（`MainWindow`）
 Web 画面本体を表示するウィンドウ。
@@ -73,7 +73,7 @@ Web 画面本体を表示するウィンドウ。
 | `WindowStyle` | `None`（フレームレス） |
 | `AllowsTransparency` / `Background` | `True` / `Transparent` |
 | `ResizeMode` | `NoResize`（リサイズはリサイズバンドで行う。§6.3 参照） |
-| `Topmost` | `True` |
+| `Topmost` | `False`（最前面固定しない通常のウィンドウ） |
 | `WindowStartupLocation` | `Manual`（初期位置は §7.4 で決定） |
 | 初期サイズ | `800 x 600`、最小 `400 x 300` |
 | アイコン | `images/DGXSpark.ico` |
@@ -83,13 +83,13 @@ Web 画面本体を表示するウィンドウ。
 - `RootBorder` の左クリックでウィンドウをドラッグ移動（`DragMove`）。
 
 ### 4.2 コントロールバー（`ControlBarWindow`）
-ホバーで表示されるフローティング操作バー。WebView2 はネイティブ子 HWND を作るため WPF レイヤーではクリックが通らないため、独立した Topmost ウィンドウとして配置。
+ホバーで表示されるフローティング操作バー。WebView2 はネイティブ子 HWND を作るため WPF レイヤーではクリックが通らないため、独立したウィンドウとして配置。
 
 | 項目 | 値 / 挙動 |
 |------|-----------|
 | サイズ | `230 x 32` |
 | 外観 | フレームレス・透過背景、`CornerRadius=8` の半透明白（`#99FFFFFF`） |
-| `Topmost` / `ShowInTaskbar` | `True` / `False` |
+| `ShowInTaskbar` | `False` |
 
 メインウィンドウの**右上**に配置（`Left = main.Left + main.Width - bar.Width - 8`、`Top = main.Top + 8`）。メインウィンドウの位置・サイズ変化時に追従再配置。
 
@@ -189,8 +189,9 @@ Web 復帰ボタン（§4.5）または ⚡ ボタンで `SetWebMode(webMode: fa
 
 ### 6.5 Z-order の維持
 - ウィンドウモードではオーバーレイがメインより前面、Web モードでは「Web 復帰ボタン > リサイズバンド > メイン」の順を維持。
-- 各ウィンドウは独立 Topmost のため Z-order 競合が起き得る。`_webModePinTimer`（400ms）で `GetTopWindow` 経由の Z-order を走査し、関係が崩れたら `SetWindowPos(HWND_TOP)` / `BringToFront` で再固定（re-pin）。
+- 各ウィンドウは独立したトップレベルウィンドウのため Z-order 競合が起き得る。`_webModePinTimer`（400ms）で `GetTopWindow` 経由の Z-order を走査し、関係が崩れたら `SetWindowPos(HWND_TOP)` / `BringToFront` で再固定（re-pin）。
 - メインウィンドウがアクティブ化（`Activated`）したときも、オーバーレイ / コントロールバーを前面に固定し直す。
+- **クリックによる前面化（`RaiseMainToForeground`）**: 全ウィンドウが非 Topmost（通常 Z-order 帯）のため、他ウィンドウの下に沈んだ状態で本体をクリックしても自動的に前面化されない。そこで `Overlay_MouseDown`（ウィンドウモード）と `RootBorder_MouseLeftButtonDown`（Web モード）で `RaiseMainToForeground()` を呼び、`SetWindowPos(HWND_TOP)` + `SetForegroundWindow` でメインを最前面化・アクティベートする。これに伴う `Activated` ハンドラがオーバーレイ・コントロールバーの Z 関係を再固定する。
 
 ### 6.6 初回起動時の導入手順
 - `MainWindow_Loaded` で WebView2 を初期化し、設定を読み込み（`LoadSettings`）。
@@ -246,7 +247,7 @@ Web 復帰ボタン（§4.5）または ⚡ ボタンで `SetWebMode(webMode: fa
 |------|-----------|
 | サイズ | `440 x 340` |
 | 外観 | フレームレス・透過背景、`CornerRadius=10`、背景色 `#FF1E1E2E`（ダーク） |
-| `Topmost` / `ShowInTaskbar` | `True` / `False` |
+| `ShowInTaskbar` | `False` |
 | 位置 | `WindowStartupLocation=CenterOwner` |
 | アイコン | `images/DGXSpark.ico` |
 
@@ -304,7 +305,7 @@ DGXSparkUtilWidget.exe -DEBUG
 
 - **透過は WebView2 ホスト HWND への `LWA_ALPHA` 適用**であり、WPF の `Window.Opacity` では実現できない。
 - **Web 入力遮断**は `WS_EX_TRANSPARENT`（親が透明で子ツリーがヒットテスト対象外になる特性）+ 透過オーバーレイで実現。`WM_NCHITTEST` フックのみでは WebView2 の子 HWND が直接 OS ヒットテストを受けるため不十分。
-- **独立 Topmost ウィンドウ**は、WebView2 がネイティブ子 HWND を作るため WPF レイヤーではクリックが通らないことと、Z-order 競合を解消するために採用。各ウィンドウの Z 関係はタイマーで維持する必要がある。
+- **独立したトップレベルウィンドウ**は、WebView2 がネイティブ子 HWND を作るため WPF レイヤーではクリックが通らないことと、Z-order 競合を解消するために採用。各ウィンドウの Z 関係はタイマーで維持する必要がある。
 - リサイズは `ResizeMode=NoResize` のため 8 個のバンドウィンドウで補完する（Web モード時のみ表示）。
 - 最小サイズ `400 x 300` はリサイズ・復元時に強制される。
 - `tools\` 配下の C# はビルド対象外。

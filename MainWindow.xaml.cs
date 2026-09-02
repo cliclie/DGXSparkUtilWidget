@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.CodeDom.Compiler;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -335,6 +335,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		RaiseMainToForeground();
 		if (e.OriginalSource is UIElement uIElement)
 		{
 			for (DependencyObject dependencyObject = uIElement; dependencyObject != null; dependencyObject = VisualTreeHelper.GetParent(dependencyObject))
@@ -653,7 +654,6 @@ public partial class MainWindow : Window, IComponentConnector
 			WindowStyle = WindowStyle.None,
 			AllowsTransparency = true,
 			Background = background,
-			Topmost = true,
 			ShowInTaskbar = false,
 			ResizeMode = ResizeMode.NoResize
 		};
@@ -716,6 +716,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		RaiseMainToForeground();
 		GetCursorPos(out var pt);
 		System.Windows.Point point = new System.Windows.Point(pt.X, pt.Y);
 		ResizeEdge resizeEdge = GetResizeEdge(e.GetPosition(_overlay));
@@ -1016,7 +1017,6 @@ public partial class MainWindow : Window, IComponentConnector
 				{
 					Background = background
 				},
-				Topmost = true,
 				ShowInTaskbar = false,
 				ResizeMode = ResizeMode.NoResize,
 				Cursor = ((edge == ResizeEdge.Left || edge == ResizeEdge.Right) ? Cursors.SizeWE : Cursors.SizeNS)
@@ -1220,6 +1220,31 @@ public partial class MainWindow : Window, IComponentConnector
 		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, 19u);
 	}
 
+	/// <summary>
+	/// メインウィンドウを最前面に上げ、アクティベートする。
+	/// ウィンドウモードではメインが WS_EX_TRANSPARENT・HTTRANSPARENT なため
+	/// 実際のクリックは WS_EX_NOACTIVATE のオーバーレイに届き、
+	/// なにもしなければ他ウィンドウの前面に上がらない。
+	/// </summary>
+	private void RaiseMainToForeground()
+	{
+		try
+		{
+			nint mainHwnd = new WindowInteropHelper(this).EnsureHandle();
+			if (mainHwnd == IntPtr.Zero)
+			{
+				return;
+			}
+			SetWindowPos(mainHwnd, HWND_TOP, 0, 0, 0, 0, 19u);
+			SetForegroundWindow(mainHwnd);
+			LogDebug("RaiseMainToForeground: main -> front");
+		}
+		catch (Exception ex)
+		{
+			LogDebug("RaiseMainToForeground error: " + ex.Message);
+		}
+	}
+
 	private nint OnMainWindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
 	{
 		if (msg != 132)
@@ -1254,6 +1279,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	[DllImport("user32.dll")]
 	private static extern bool SetFocus(nint hWnd);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool SetForegroundWindow(nint hWnd);
 
 	[DllImport("user32.dll")]
 	private static extern int GetSystemMetrics(int nIndex);
@@ -1348,7 +1377,6 @@ public partial class MainWindow : Window, IComponentConnector
 				WindowStyle = WindowStyle.None,
 				AllowsTransparency = true,
 				Background = System.Windows.Media.Brushes.Transparent,
-				Topmost = true,
 				ShowInTaskbar = false,
 				Width = 230.0,
 				Height = 32.0,

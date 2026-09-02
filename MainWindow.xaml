@@ -9,7 +9,6 @@
         AllowsTransparency="True"
         Background="Transparent"
         ResizeMode="NoResize"
-        Topmost="True"
         WindowStartupLocation="Manual"
         Icon="images/DGXSpark.ico"
         Loaded="MainWindow_Loaded">

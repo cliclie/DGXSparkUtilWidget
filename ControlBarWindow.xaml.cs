@@ -6,7 +6,7 @@ namespace DGXSparkUtilWidget
     /// <summary>
     /// 浮遊コントロールバー用ウィンドウ。
     /// WebView2 のネイティブHWND は WPF レンダリング面の上にあるため、
-    /// 独立した Topmost ウィンドウとすることで常に最前面に表示・クリック可能になる。
+    /// 独立したウィンドウとすることで WebView2 の上に表示・クリック可能になる。
     /// </summary>
     public partial class ControlBarWindow : Window
     {

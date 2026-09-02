@@ -6,7 +6,6 @@
         AllowsTransparency="True"
         Background="Transparent"
         ResizeMode="NoResize"
-        Topmost="True"
         ShowInTaskbar="False">
 
     <Window.Resources>
